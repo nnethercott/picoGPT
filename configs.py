@@ -1,0 +1,40 @@
+from dataclasses import dataclass
+from typing import Optional
+
+import torch
+
+from utils import RMSNorm
+
+
+@dataclass 
+class Config:
+    linear_cls: torch.nn.Module = torch.nn.Linear # add option later for bitlinear, lora 
+    vocab_size: int = 30000
+    bias: bool = False
+    dropout: float = 0.0
+    n_layer: int = 12 
+    n_head: int =  12
+    n_embd: int = 786 
+    block_size: int = 1024 
+    n_query_groups: int = 12
+    theta: int = 10000
+    norm_cls: torch.nn.Module = RMSNorm
+    norm_eps: float = 1e-05
+    tie_weights: bool = True
+ 
+
+    @property 
+    def head_size(self):
+        return self.n_embd//self.n_head
+
+
+@dataclass 
+class TrainConfig:
+    n_epochs: int = 1 
+    warmup_ratio: float = 0.03
+    batch_size: int = 16
+    gradient_accumulation_steps: int = 1
+    log_ratio: float = 0.05
+    grad_clip: Optional[float] = None
+    weight_decay: float = 0.0
+    lr: float = 1e-04
