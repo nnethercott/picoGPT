@@ -11,7 +11,7 @@ from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 
 from configs import Config, TrainConfig
-from model import PicoLlama
+from model import PicoGPT
 
 tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 ds = load_dataset("karpathy/tiny_shakespeare", split = "train", trust_remote_code=True)
@@ -32,13 +32,13 @@ config = Config(
 
 train_config = TrainConfig(
     n_epochs = 10,
-    batch_size = 8,
-    lr = 1e-04, 
-    gradient_accumulation_steps = 4,
+    batch_size = 64,
+    lr = 1e-03, 
+    gradient_accumulation_steps = 1,
     warmup_ratio = 0.0,
     grad_clip = None,
     weight_decay = 0.0,
-    log_ratio = 0.01,
+    log_ratio = 0.0,
 )
 
 
@@ -62,7 +62,7 @@ dl = DataLoader(ds, batch_size = train_config.batch_size, shuffle = False)
 
 
 # model
-model = PicoLlama(config)
+model = PicoGPT(config)
 model.train()
 print(f"total model params: {model.get_num_params()/1e6} [mil]")
 

@@ -112,7 +112,7 @@ class Block(nn.Module):
         x = x + self.mlp(self.norm_2(x))
         return x
 
-class PicoLlama(nn.Module):
+class PicoGPT(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config 
@@ -152,6 +152,9 @@ class PicoLlama(nn.Module):
     def forward(self, x):
         assert x.shape[1]<=self.config.block_size, f"cannot forward seq of length {x.shape[1]}. max `block_size` configured to {self.config.block_size}"
         x = self.transformer.wte(x)
+
+        # pos = torch.arange(0, x.shape[1], dtype=torch.long, device="cpu")
+        # x = x + self.transformer.wpe(pos)
 
         for block in self.transformer.h:
             x = block(x)
