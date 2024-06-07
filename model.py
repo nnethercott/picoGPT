@@ -3,6 +3,7 @@ import math
 
 import torch
 import torch.nn.functional as F
+import wandb
 from rotary_embedding_torch import RotaryEmbedding
 from torch import nn
 
@@ -191,7 +192,7 @@ class PicoGPT(nn.Module):
         return optimizer
 
 
-    def generate(self, input_ids, max_new_tokens = 100, temperature = 1.0, top_k = None):
+    def generate(self, input_ids, max_new_tokens = 64, temperature = 1.0, top_k = None, do_sample = False, eos_token_id = -1):
         new_tokens = [] 
 
         self.eval()
@@ -201,16 +202,25 @@ class PicoGPT(nn.Module):
                 input_ids = input_ids[:,-self.config.block_size:]
 
                 logits = self.forward(input_ids)['logits'][:,-1]
-                if top_k is not None:
-                    v, _ = torch.topk(logits, top_k)
-                    logits[logits<v[:,[-1]]] = float('-inf')
 
-                probs = F.softmax(logits/temperature, dim=-1)
-                next_token = torch.multinomial(probs, 1)
-                new_tokens.append(next_token.item())
+                if do_sample:
+                    if top_k is not None:
+                        v, _ = torch.topk(logits, top_k)
+                        logits[logits<v[:,[-1]]] = float('-inf')
+
+                    probs = F.softmax(logits/temperature, dim=-1)
+                    next_token = torch.multinomial(probs, 1)
+                    new_tokens.append(next_token.item())
+
+                else:
+                    next_token = logits.argmax(dim=-1).unsqueeze(0)
+                    new_tokens.append(next_token.item())
 
                 # append 
                 input_ids = torch.cat((input_ids, next_token), dim=1)
+
+                if next_token.item() == eos_token_id:
+                    break 
 
         return new_tokens
 

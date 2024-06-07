@@ -40,3 +40,6 @@ class TrainConfig:
     weight_decay: float = 0.0
     lr: float = 1e-04
     distill_temperature: float = 1.0
+    wandb_project: Optional[str] = None
+    wandb_entity: Optional[str] = None 
+    wandb_report: bool = False

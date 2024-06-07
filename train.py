@@ -3,6 +3,7 @@ import time
 
 import torch
 import torch.nn.functional as F
+import wandb
 from datasets import load_dataset
 from toktokenizer import BPETokenizer
 from torch import nn
@@ -14,20 +15,20 @@ from configs import Config, TrainConfig
 from model import PicoGPT
 from utils import cosine_loss, kl_div
 
-# teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-teacher_model_id = "openai-community/gpt2"
+teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+# teacher_model_id = "openai-community/gpt2"
 tok = AutoTokenizer.from_pretrained(teacher_model_id)
 
 config = Config(
     vocab_size = len(tok),
     block_size = 128,
-    n_layer = 6,
+    n_layer = 11,
     n_embd = 768,
-    n_head = 4,
-    n_query_groups = 2,
+    n_head = 16,
+    n_query_groups = 4,
     tie_weights = True,
     rope_theta = 10000,
-    neftune_noise_alpha=0.0,
+    neftune_noise_alpha=1.0,
 )
 
 train_config = TrainConfig(
@@ -57,9 +58,9 @@ class CustomDataset(Dataset):
         return self.data[idx]
 
 
-ds = load_dataset("bigcode/starcoderdata", data_dir="python", split="train")
+ds = load_dataset("bigcode/starcoderdata", data_dir="rust", split="train[:1000]")
 ds = ds.filter(lambda x: [len(y)<256 for y in x['content']], batched = True)
-tokens = ds.map(lambda x: {'tokens': tok.encode(x['content'])}, batched=False)['tokens']
+tokens = ds.map(lambda x: {'tokens': tok.encode(x['content']) + [tok.eos_token_id]}, batched=False)['tokens'] # added eos token
 ds = CustomDataset(tokens)
 
 dl = DataLoader(ds, batch_size = train_config.batch_size, shuffle = False, collate_fn = collate_fn)
@@ -67,6 +68,7 @@ dl = DataLoader(ds, batch_size = train_config.batch_size, shuffle = False, colla
 
 # model
 model = PicoGPT(config)
+model.load_state_dict(torch.load("./pico_starcoder.pt", map_location=torch.device('cpu')))
 model.train()
 print(f"total model params: {model.get_num_params()/1e6} mil")
 
@@ -78,6 +80,10 @@ teacher.eval()
 
 def train(model, train_config):
     c = train_config 
+
+    # init wandb 
+    if c.wandb_report:
+        wandb.init(project = c.wandb_project, entity = c.wandb_entity)
 
     training_steps = len(dl)*c.n_epochs
     warmup_steps = int(c.warmup_ratio*training_steps)
@@ -135,17 +141,18 @@ def train(model, train_config):
                 lossf = c.gradient_accumulation_steps*loss.item()
                 dt = (time.time()-start)/steps 
                 left = dt*(training_steps-steps)/60
-                # print(f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | kl {kl.item():4f} | cos {cl.item():4f} | est. time {left:2f}")
                 print(f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}")
 
-
+            if c.wandb_report:
+                wandb.log({'loss': c.gradient_accumulation_steps*loss.item(), 'ce': ce_loss, 'kl': kl, 'lr': scheduler.get_last_lr()[0]})
                 
     stop = time.time()
-    print("finished training in {stop-start}s")
+    print(f"finished training in {stop-start}s")
 
-train(model, train_config)
+# train(model, train_config)
 
 model.eval()
-input_ids = torch.tensor(tok.encode("King:")).unsqueeze(0)
-generated = model.generate(input_ids, temperature = 1.2, top_k = 128)
-print(tok.decode(generated))
+input_ids = torch.tensor(tok.encode("fn main(){")).unsqueeze(0)
+generated = model.generate(input_ids, temperature = 0.7, top_k = 16, max_new_tokens = 32)
+# generated = model.generate(input_ids, do_sample=False, max_new_tokens = 32)
+print(tok.decode(generated, skip_special_tokens = True))
