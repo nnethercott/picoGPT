@@ -17,10 +17,11 @@ class Config:
     n_embd: int = 786 
     block_size: int = 1024 
     n_query_groups: int = 12
-    theta: int = 10000
+    rope_theta: int = 10000
     norm_cls: torch.nn.Module = RMSNorm
     norm_eps: float = 1e-05
     tie_weights: bool = True
+    neftune_noise_alpha: float = 0.0
  
 
     @property 
@@ -38,3 +39,4 @@ class TrainConfig:
     grad_clip: Optional[float] = None
     weight_decay: float = 0.0
     lr: float = 1e-04
+    distill_temperature: float = 1.0

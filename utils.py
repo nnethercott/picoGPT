@@ -1,4 +1,7 @@
+import math
+
 import torch
+import torch.nn.functional as F
 from torch import nn
 
 
@@ -18,4 +21,61 @@ class RMSNorm(nn.Module):
 
     def reset_parameters(self):
         nn.init.ones_(self.weight)
+
+
+def neftune_forward_hook(module, input, output, alpha):
+    if module.training and alpha>0.0:
+        L,d = output.shape[-2:]
+        alpha = alpha/torch.sqrt(torch.tensor(L*d))
+        eps = torch.zeros_like(output).uniform_(-alpha, alpha)
+        return output + eps 
+    
+    return output
+
+def kl_div(inputs, targets, t):
+    targets = targets.view(-1, targets.size(-1))
+    inputs = inputs.view(-1, inputs.size(-1))
+
+    targets = F.log_softmax(targets/t, dim = -1)
+    inputs = F.log_softmax(inputs/t, dim = -1)
+
+    kl = F.kl_div(inputs, targets, log_target=True, reduction = 'batchmean')
+
+    return kl 
+
+
+# NOTE: main intention is target model has 1/n the number of layers 
+def cosine_loss(inputs, targets, n):
+    inputs = torch.cat(inputs)
+    targets = torch.cat([h for e,h in enumerate(targets) if e%n == 0])
+
+    assert inputs.shape == targets.shape, "make sure to properly configure student model"
+
+    inputs = inputs.view(-1, inputs.shape[-1])
+    targets = targets.view(-1, targets.shape[-1])
+
+    B, d = inputs.shape
+    y = torch.ones(B) 
+
+    loss = F.cosine_embedding_loss(inputs, targets, y)
+    return math.sqrt(d)*loss 
+
+
+# class LoraLinear(nn.Module):
+#     def __init__(self, in_features, out_features, bias, r, **kwargs):
+#         super().__init__()
+#
+#         A = torch.randn((r, in_features))
+#         B = torch.randn((out_features, r))
+#         
+#         self.in_features = in_features
+#         self.out_features = out_features
+#
+#         if bias:
+#             self.bias = nn.Parameter(torch.empty(out_features))
+#         else:
+#             self.register_parameter('bias', None)
+#
+#         self.weight = nn.Parameter(B@A, requires_grad=True)
+
 

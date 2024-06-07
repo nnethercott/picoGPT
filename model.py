@@ -1,3 +1,4 @@
+import functools
 import math
 
 import torch
@@ -6,7 +7,7 @@ from rotary_embedding_torch import RotaryEmbedding
 from torch import nn
 
 from configs import Config
-from utils import RMSNorm
+from utils import RMSNorm, neftune_forward_hook
 
 
 class MLP(nn.Module):
@@ -22,6 +23,7 @@ class MLP(nn.Module):
         return x
 
 
+# always dense linear layers for causal self attention?
 class CausalSelfAttention(nn.Module):
     """
     rotary positional embeddings from: https://github.com/lucidrains/rotary-embedding-torch
@@ -35,7 +37,9 @@ class CausalSelfAttention(nn.Module):
         shape = (config.n_head + 2*config.n_query_groups)*config.head_size # n_head per query + (k+v)*n_query_groups
         
         self.c_attn = config.linear_cls(config.n_embd, shape, bias = config.bias)
+        # self.c_attn = nn.Linear(config.n_embd, shape, bias = config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
+        # self.proj = nn.Linear(config.head_size*config.n_head, config.n_embd, bias = config.bias)
         self.proj = config.linear_cls(config.head_size*config.n_head, config.n_embd, bias = config.bias)
 
         if not self.flash:
@@ -45,7 +49,7 @@ class CausalSelfAttention(nn.Module):
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size))
                                         .view(1, 1, config.block_size, config.block_size))
 
-        self.rotary_emb = RotaryEmbedding(config.head_size, theta = config.theta)
+        self.rotary_emb = RotaryEmbedding(config.head_size, theta = config.rope_theta)
 
     def forward(self, x):
         B, T, C = x.shape 
@@ -125,10 +129,15 @@ class PicoGPT(nn.Module):
         ))
 
         self.lm_head = config.linear_cls(config.n_embd, config.vocab_size, bias = config.bias)
-        self.transformer.wte.weight = self.lm_head.weight # weight tying 
 
         if config.tie_weights:
-            self.apply(self._init_weights)
+            self.transformer.wte.weight = self.lm_head.weight # weight tying 
+        
+        self.apply(self._init_weights)
+
+        self.transformer.wte.register_forward_hook(
+            functools.partial(neftune_forward_hook, alpha = config.neftune_noise_alpha)
+        )
 
 
     # from karpathy (tiny llama has different init)
@@ -152,16 +161,19 @@ class PicoGPT(nn.Module):
     def forward(self, x):
         assert x.shape[1]<=self.config.block_size, f"cannot forward seq of length {x.shape[1]}. max `block_size` configured to {self.config.block_size}"
         x = self.transformer.wte(x)
-
         # pos = torch.arange(0, x.shape[1], dtype=torch.long, device="cpu")
         # x = x + self.transformer.wpe(pos)
 
+        # "one for the output of the embeddings, if the model has an embedding layer, + one for the output of each layer"
+        hidden_states = [x] 
+
         for block in self.transformer.h:
             x = block(x)
+            hidden_states.append(x)
 
         x = self.transformer.ln_f(x)
 
-        return self.lm_head(x)
+        return {'logits': self.lm_head(x), 'hidden_states': hidden_states}
 
 
     def configure_optimizers(self, train_config):
@@ -188,7 +200,7 @@ class PicoGPT(nn.Module):
                 # truncate input_ids to context_length 
                 input_ids = input_ids[:,-self.config.block_size:]
 
-                logits = self.forward(input_ids)[:,-1]
+                logits = self.forward(input_ids)['logits'][:,-1]
                 if top_k is not None:
                     v, _ = torch.topk(logits, top_k)
                     logits[logits<v[:,[-1]]] = float('-inf')
