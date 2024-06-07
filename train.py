@@ -20,7 +20,7 @@ tok = AutoTokenizer.from_pretrained(teacher_model_id)
 
 config = Config(
     vocab_size = len(tok),
-    block_size = 64,
+    block_size = 128,
     n_layer = 6,
     n_embd = 768,
     n_head = 4,
@@ -32,7 +32,7 @@ config = Config(
 
 train_config = TrainConfig(
     n_epochs = 3,
-    batch_size = 2,
+    batch_size = 1,
     lr = 1e-03, 
     gradient_accumulation_steps = 1,
     warmup_ratio = 0.0,
@@ -42,12 +42,9 @@ train_config = TrainConfig(
     distill_temperature=1.0,
 )
 
-
 # dataset 
-ds = load_dataset("karpathy/tiny_shakespeare", split = "train", trust_remote_code=True)
-tokens = tok.encode(ds[0]['text'])
-tokens = tokens[:(len(tokens)//config.block_size)*config.block_size] # drop last chunk<block_size
-tokens = torch.tensor(tokens).view(-1, config.block_size)
+def collate_fn(inputs):
+    return torch.tensor(inputs)
 
 class CustomDataset(Dataset):
     def __init__(self, data):
@@ -59,15 +56,19 @@ class CustomDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
+
+ds = load_dataset("bigcode/starcoderdata", data_dir="python", split="train")
+ds = ds.filter(lambda x: [len(y)<256 for y in x['content']], batched = True)
+tokens = ds.map(lambda x: {'tokens': tok.encode(x['content'])}, batched=False)['tokens']
 ds = CustomDataset(tokens)
-dl = DataLoader(ds, batch_size = train_config.batch_size, shuffle = False)
+
+dl = DataLoader(ds, batch_size = train_config.batch_size, shuffle = False, collate_fn = collate_fn)
 
 
 # model
 model = PicoGPT(config)
 model.train()
 print(f"total model params: {model.get_num_params()/1e6} mil")
-
 
 # distill model 
 # TODO: explore quantized performance 
@@ -134,7 +135,9 @@ def train(model, train_config):
                 lossf = c.gradient_accumulation_steps*loss.item()
                 dt = (time.time()-start)/steps 
                 left = dt*(training_steps-steps)/60
-                print(f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | kl {kl.item():4f} | cos {cl.item():4f} | est. time {left:2f}")
+                # print(f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | kl {kl.item():4f} | cos {cl.item():4f} | est. time {left:2f}")
+                print(f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}")
+
 
                 
     stop = time.time()
