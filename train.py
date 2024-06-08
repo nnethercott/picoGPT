@@ -59,7 +59,7 @@ class CustomDataset(Dataset):
 
 
 ds = load_dataset("bigcode/starcoderdata", data_dir="rust", split="train[:1000]")
-ds = ds.filter(lambda x: [len(y)<256 for y in x['content']], batched = True)
+ds = ds.filter(lambda x: [len(y)<256 and '//' in y for y in x['content']], batched = True)
 tokens = ds.map(lambda x: {'tokens': tok.encode(x['content']) + [tok.eos_token_id]}, batched=False)['tokens'] # added eos token
 ds = CustomDataset(tokens)
 
@@ -152,7 +152,7 @@ def train(model, train_config):
 # train(model, train_config)
 
 model.eval()
-input_ids = torch.tensor(tok.encode("fn main(){")).unsqueeze(0)
-generated = model.generate(input_ids, temperature = 0.7, top_k = 16, max_new_tokens = 32)
+input_ids = torch.tensor(tok.encode("fn fib(){")).unsqueeze(0)
+generated = model.generate(input_ids, temperature = 0.7, top_k = 16, max_new_tokens = 32, do_sample=True)
 # generated = model.generate(input_ids, do_sample=False, max_new_tokens = 32)
 print(tok.decode(generated, skip_special_tokens = True))
