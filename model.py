@@ -192,7 +192,7 @@ class PicoGPT(nn.Module):
         return optimizer
 
 
-    def generate(self, input_ids, max_new_tokens = 64, temperature = 1.0, top_k = None, do_sample = False, eos_token_id = -1):
+    def generate(self, input_ids, max_new_tokens = 64, temperature = 1.0, top_k = None, do_sample = False, eos_token_id = -1, num_beams = 1, num_return_sequences=1):
         new_tokens = [] 
 
         self.eval()
@@ -212,9 +212,9 @@ class PicoGPT(nn.Module):
                     next_token = torch.multinomial(probs, 1)
                     new_tokens.append(next_token.item())
 
-                else:
-                    next_token = logits.argmax(dim=-1).unsqueeze(0)
-                    new_tokens.append(next_token.item())
+                else: #greedy search subset of beam search 
+                    new_tokens = self._beam_search(input_ids, max_new_tokens, num_beams, num_return_sequences)
+                    return new_tokens
 
                 # append 
                 input_ids = torch.cat((input_ids, next_token), dim=1)
@@ -224,10 +224,35 @@ class PicoGPT(nn.Module):
 
         return new_tokens
 
-                
+    
 
+    # TODO: handle eos token generated case
+    def _beam_search(self, input_ids, max_new_tokens=100, num_beams=1, num_return_sequences=1):
+        size = input_ids.shape[1]
 
+        beams = [{'cum_log_prob': 0., 'ids': input_ids}] 
+        
+        for _ in range(max_new_tokens):
+            new_beams = [] 
 
+            for beam in beams:
+                logits = self.forward(beam['ids'])['logits']
+                probs = F.log_softmax(logits[:,-1,:], dim=-1) #avoid underflow 
+                ps, ids = torch.topk(probs, k=num_beams)
+
+                ps = ps.squeeze(0)
+                ids = ids.squeeze(0)
+
+                # log(p1*p2*p3) = log(p1)+log(p2)+log(p3)
+                for p,i in zip(ps, ids):
+                    new_beams.append({'cum_log_prob': beam['cum_log_prob'] + p, 'ids': torch.cat((beam['ids'], i.view(1,1)), dim=-1)})
+                    
+            beams = new_beams
+
+            # keep `num_beams`
+            beams = sorted(beams, key = lambda x: x['cum_log_prob'], reverse = True)[:num_beams]
+
+        return [beam['ids'][:,size:].squeeze(0) for beam in beams[:num_return_sequences]]
 
 
 

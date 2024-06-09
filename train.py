@@ -62,7 +62,7 @@ class CustomDataset(Dataset):
 # ds = ds.filter(lambda x: [len(y)<256 and '//' in y for y in x['content']], batched = True)
 # tokens = ds.map(lambda x: {'tokens': tok.encode(x['content']) + [tok.eos_token_id]}, batched=False)['tokens'] # added eos token
 
-i_code = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
+i_code = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train[:10]")
 i_code = i_code.map(lambda x: {'tokens': tok.encode(f"### Instruction: {x['instruction']}\n### Output:\n{x['output']}")+[tok.eos_token_id]}, batched=False)
 i_code_tokens = i_code.filter(lambda x: [len(y)<config.block_size for y in x['tokens']], batched = True)['tokens']
 
@@ -156,8 +156,12 @@ def train(model, train_config):
 
 # train(model, train_config)
 
-# model.eval()
-# input_ids = torch.tensor(tok.encode("fn fib(){")).unsqueeze(0)
-# generated = model.generate(input_ids, temperature = 0.7, top_k = 16, max_new_tokens = 32, do_sample=True)
-# # generated = model.generate(input_ids, do_sample=False, max_new_tokens = 32)
-# print(tok.decode(generated, skip_special_tokens = True))
+model.eval()
+input_ids = torch.tensor(tok.encode("fn")).unsqueeze(0)
+generated = model.generate(input_ids, num_beams = 3, max_new_tokens=16, num_return_sequences=3)
+# generated = model.generate(input_ids, do_sample=False, max_new_tokens = 32)
+
+for i,g in enumerate(generated):
+    print(f"GENERATION {i}")
+    print(tok.decode(g, skip_spbatch_decodeecial_tokens = True))
+    print("\n")
