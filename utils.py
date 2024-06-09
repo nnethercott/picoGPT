@@ -46,8 +46,10 @@ def kl_div(inputs, targets, t):
 
 # NOTE: main intention is target model has 1/n the number of layers 
 def cosine_loss(inputs, targets, n):
-    inputs = torch.cat(inputs)
-    targets = torch.cat([h for e,h in enumerate(targets) if e%n == 0])
+    device = inputs.device
+
+    inputs = torch.cat(inputs, device=device)
+    targets = torch.cat([h for e,h in enumerate(targets) if e%n == 0], device=device)
 
     assert inputs.shape == targets.shape, "make sure to properly configure student model"
 
@@ -55,10 +57,10 @@ def cosine_loss(inputs, targets, n):
     targets = targets.view(-1, targets.shape[-1])
 
     B, d = inputs.shape
-    y = torch.ones(B) 
+    y = torch.ones(B, device=device) 
 
     loss = F.cosine_embedding_loss(inputs, targets, y)
-    return math.sqrt(d)*loss 
+    return math.sqrt(d)*loss  #added by moi 
 
 
 # class LoraLinear(nn.Module):

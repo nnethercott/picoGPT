@@ -6,11 +6,13 @@ smaller implementation of karpathy's [nanoGPT](https://github.com/karpathy/nanoG
 
 - [x] [NEFTune](https://arxiv.org/abs/2310.05914)
 - [x] [Grouped Query Attention](https://arxiv.org/pdf/2305.13245)
-- [ ] Beam Search
+- [ ] Beam search
 - [x] [RMSNorm](https://arxiv.org/abs/1910.07467)
-- [x] [Knowledge Distillation (student-teacher learning)](https://arxiv.org/abs/1503.02531)
-- [x] Cosine Embedding loss
+- [x] [Knowledge distillation (student-teacher learning)](https://arxiv.org/abs/1503.02531)
+- [x] Cosine embedding loss
 - [ ] Attention mask & padding
+- [ ] DDP
+- [ ] mixed-precision
 
 ## resources
 
