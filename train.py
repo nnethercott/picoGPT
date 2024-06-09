@@ -15,32 +15,34 @@ from configs import Config, TrainConfig
 from model import PicoGPT
 from utils import cosine_loss, kl_div
 
-teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-# teacher_model_id = "openai-community/gpt2"
+# teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+teacher_model_id = "openai-community/gpt2"
 tok = AutoTokenizer.from_pretrained(teacher_model_id)
 
 config = Config(
     vocab_size = len(tok),
-    block_size = 128,
-    n_layer = 11,
-    n_embd = 768,
-    n_head = 16,
+    block_size = 64,
+    n_layer = 6,
+    n_embd = 256,
+    n_head = 8,
     n_query_groups = 4,
     tie_weights = True,
     rope_theta = 10000,
     neftune_noise_alpha=1.0,
+    dropout = 0.2,
 )
 
 train_config = TrainConfig(
-    n_epochs = 3,
-    batch_size = 1,
+    n_epochs = 10,
+    batch_size = 32,
     lr = 1e-03, 
-    gradient_accumulation_steps = 1,
+    gradient_accumulation_steps = 2,
     warmup_ratio = 0.0,
     grad_clip = 1.0,
     weight_decay = 0.0,
     log_ratio = 0.0,
     distill_temperature=1.0,
+    wandb_report=False,
 )
 
 # dataset 
@@ -58,22 +60,19 @@ class CustomDataset(Dataset):
         return self.data[idx]
 
 
-# ds = load_dataset("bigcode/starcoderdata", data_dir="rust", split="train[:1000]")
-# ds = ds.filter(lambda x: [len(y)<256 and '//' in y for y in x['content']], batched = True)
-# tokens = ds.map(lambda x: {'tokens': tok.encode(x['content']) + [tok.eos_token_id]}, batched=False)['tokens'] # added eos token
 
-i_code = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train[:10]")
-i_code = i_code.map(lambda x: {'tokens': tok.encode(f"### Instruction: {x['instruction']}\n### Output:\n{x['output']}")+[tok.eos_token_id]}, batched=False)
-i_code_tokens = i_code.filter(lambda x: [len(y)<config.block_size for y in x['tokens']], batched = True)['tokens']
-
-ds = CustomDataset(i_code_tokens)
+text = load_dataset("karpathy/tiny_shakespeare")['train'][0]['text']
+tokens = tok.encode(text)
+tokens = tokens[:-(len(tokens)%config.block_size)]
+tokens = [tokens[i*config.block_size:(i+1)*config.block_size] for i in range(len(tokens)//config.block_size)]
+ds = CustomDataset(tokens)
 
 dl = DataLoader(ds, batch_size = train_config.batch_size, shuffle = False, collate_fn = collate_fn)
 
 
 # model
 model = PicoGPT(config)
-model.load_state_dict(torch.load("./pico_starcoder.pt", map_location=torch.device('cpu')))
+# model.load_state_dict(torch.load("./pico_starcoder.pt", map_location=torch.device('cpu')))
 model.train()
 print(f"total model params: {model.get_num_params()/1e6} mil")
 
@@ -82,9 +81,8 @@ print(f"total model params: {model.get_num_params()/1e6} mil")
 teacher = AutoModelForCausalLM.from_pretrained(teacher_model_id)
 teacher.eval()
 
-
 def train(model, train_config):
-    c = train_config 
+    c = train_config
 
     # init wandb 
     if c.wandb_report:
@@ -112,14 +110,14 @@ def train(model, train_config):
 
             ############## kl ####################
             # https://pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html
-            t = train_config.distill_temperature
-            kl_inputs = logits.view(-1, logits.shape[-1])
-            with torch.no_grad():
-                teacher_out = teacher(mini_batch, output_hidden_states = True)
-
-            kl_targets = teacher_out['logits']
-
-            kl = kl_div(kl_inputs, kl_targets, t)
+            # t = train_config.distill_temperature
+            # kl_inputs = logits.view(-1, logits.shape[-1])
+            # with torch.no_grad():
+            #     teacher_out = teacher(mini_batch, output_hidden_states = True)
+            #
+            # kl_targets = teacher_out['logits']
+            #
+            # kl = kl_div(kl_inputs, kl_targets, t)
 
             # optional
             ############# cosine loss ###############
@@ -128,7 +126,8 @@ def train(model, train_config):
             #
             # cl = cosine_loss(hidden_states, teacher_hidden_states, 2) 
 
-            loss = (ce_loss + kl)/2
+            # loss = (ce_loss + kl)/2
+            loss = ce_loss
             loss = loss/c.gradient_accumulation_steps
             loss.backward()
 
@@ -154,10 +153,10 @@ def train(model, train_config):
     stop = time.time()
     print(f"finished training in {stop-start}s")
 
-# train(model, train_config)
+train(model, train_config)
 
-model.eval()
-input_ids = torch.tensor(tok.encode("fn")).unsqueeze(0)
+model.eval() 
+input_ids = torch.tensor(tok.encode("King:")).unsqueeze(0)
 generated = model.generate(input_ids, num_beams = 3, max_new_tokens=16, num_return_sequences=3)
 # generated = model.generate(input_ids, do_sample=False, max_new_tokens = 32)
 
