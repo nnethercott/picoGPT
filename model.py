@@ -236,7 +236,8 @@ class PicoGPT(nn.Module):
             new_beams = [] 
 
             for beam in beams:
-                logits = self.forward(beam['ids'])['logits']
+                # truncate 
+                logits = self.forward(beam['ids'][:,-self.config.block_size:])['logits']
                 probs = F.log_softmax(logits[:,-1,:], dim=-1) #avoid underflow 
                 ps, ids = torch.topk(probs, k=num_beams)
 
