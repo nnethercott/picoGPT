@@ -59,7 +59,7 @@ How far best hope of it, weal is told.
 - [x] [Knowledge distillation (student-teacher learning)](https://arxiv.org/abs/1503.02531)
 - [x] Cosine embedding loss
 - [ ] Attention mask & padding
-- [ ] DDP
+- [x] DDP
 - [ ] mixed-precision
 
 ## resources
