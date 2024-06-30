@@ -2,19 +2,18 @@
 import functools
 import time
 import math
+import os
 
 # pico 
 from configs import Config, TrainConfig
-from utils import cosine_loss, kl_div
+from utils import cosine_loss, kl_div, get_cosine_schedule_with_warmup
 from model import PicoGPT
+from dataset import *
 
-from datasets import load_dataset 
-import datasets
 from toktokenizer import BPETokenizer
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
-    get_cosine_schedule_with_warmup,
     BitsAndBytesConfig,
 )
 import wandb
@@ -22,7 +21,6 @@ import wandb
 # torch 
 import torch
 from torch import nn
-from torch.utils.data import DataLoader, Dataset
 import torch.nn.functional as F
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.multiprocessing as mp 
@@ -53,77 +51,25 @@ config = Config(
 
 train_config = TrainConfig(
     n_epochs=1,
-    batch_size=16,
+    batch_size=8,
     lr=1e-04,
+    min_lr = 2e-05, 
     gradient_accumulation_steps=4,
     warmup_ratio=0.03,
     grad_clip=1.0,
     weight_decay=0.1,
     save_steps = 1000,
-    log_steps = 1,
-    wandb_report = False,
+    log_steps = 50,
+    wandb_report = True,
     wandb_entity = "nnethercott",
     wandb_project = "picoGPT",
-    distill_temperature=1.1,
+    distill_temperature=1.2,
+    top_k = 48,
     ckpt_path = "./checkpoints/pico_tinyllama_9.pt",
     save_path = "./checkpoints/pico_tinyllama_10.pt",
     teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    ddp = True,
 )
-
-
-# dataset prep 
-# TODO: move collating fn to utils 
-def collate_fn(inputs):
-    return torch.tensor(inputs)
-
-class CustomDataset(torch.utils.data.Dataset):
-    def __init__(self, data):
-        self.data = data
-
-    def __len__(self):
-        return len(self.data)
-
-    def __getitem__(self, idx):
-        return self.data[idx]
-
-def load_training_data():
-  #data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-  #texts = data.skip(800000).take(500)
-
-  ## preprocessing
-  ## https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
-  #def dataset_generator(dataset):
-  #    yield from dataset
-
-  #texts = datasets.Dataset.from_generator(functools.partial(dataset_generator, texts))
-  #texts = texts.map(
-  #    lambda x: {**x, "tokens": [tok.encode(y)[: config.block_size] for y in x["text"]]},
-  #    batched=True,
-  #)
-  #texts = texts.filter(
-  #    lambda x: [len(y) == config.block_size for y in x["tokens"]], batched=True
-  #)
-  #tokens = texts["tokens"]
-
-
-  ## dataset object
-  #ds = CustomDataset(tokens)
-  #dl = DataLoader(
-  #    ds, batch_size=train_config.batch_size, shuffle=False, collate_fn=collate_fn
-  #)
-
-  #tiny shakespeare 
-  text = load_dataset("karpathy/tiny_shakespeare")['train'][0]['text']
-  tokens = tok.encode(text)
-  tokens = tokens[:-(len(tokens)%config.block_size)]
-  tokens = [tokens[i*config.block_size:(i+1)*config.block_size] for i in range(len(tokens)//config.block_size)]
-  ds = CustomDataset(tokens)
-  dl = DataLoader(
-      ds, batch_size=train_config.batch_size, shuffle=False, collate_fn=collate_fn
-  )
-  return dl 
-
-
 
 def load_teacher(teacher_model_id):
   quantization_config = BitsAndBytesConfig(
@@ -139,38 +85,49 @@ def load_teacher(teacher_model_id):
   return teacher 
 
 
-# TODO: configure train config for scheduler params
 def train(model_config, train_config):
   c = train_config
 
+  dl = load_training_data(model_config, train_config, tok, rank = int(os.getenv("LOCAL_RANK")))
+  training_steps = int(len(dl) * c.n_epochs)
+  warmup_steps = int(c.warmup_ratio * training_steps)
+
   if c.ddp:
     # DDP setup 
-    rank = os.environ["LOCAL_RANK"]
-    world_size = os.environ["WORLD_SIZE"]
+    rank = int(os.environ["LOCAL_RANK"])
+    master_rank = rank == 0
+    world_size = int(os.environ["WORLD_SIZE"])
     device = f"cuda:{rank}"
-    torch.cuda.set_device(device)
+    torch.cuda.set_device(rank)
     model = PicoGPT(model_config).to(device)
+
+    if c.ckpt_path:
+      print(f'loading checkpoint {c.ckpt_path} from file...')
+      model.load_state_dict(torch.load(c.ckpt_path))
+
+    # optimizers 
+    optimizer = model.configure_optimizers(train_config)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
+
     model = DDP(model, device_ids = [rank])
 
-    # load data 
-    dl = load_training_data()
   else:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model = PicoGPT(model_config).to(device)
-    dl = load_training_data()
+    if c.ckpt_path:
+      print(f'loading checkpoint {c.ckpt_path} from file...')
+      model.load_state_dict(torch.load(c.ckpt_path))
+
+    optimizer = model.configure_optimizers(train_config)
+    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
+    master_rank = True
   
   teacher = load_teacher(c.teacher_model_id)
-  #model.load_state_dict(torch.load(c.ckpt_path))
-
-  training_steps = int(len(dl) * c.n_epochs)
-  warmup_steps = int(c.warmup_ratio * training_steps)
-  optimizer = model.configure_optimizers(train_config)
-  scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps)
-  #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x: 1.0)
 
 
   if c.wandb_report:
-    wandb.init(project=c.wandb_project, entity=c.wandb_entity)
+    if master_rank:
+      wandb.init(project=c.wandb_project, entity=c.wandb_entity)
 
   start = time.time()
   steps = 0
@@ -191,13 +148,13 @@ def train(model_config, train_config):
           ############## kl ####################
           # https://pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html
           t = c.distill_temperature
-          kl_inputs = logits.view(-1, logits.shape[-1])
           with torch.no_grad():
               teacher_out = teacher(mini_batch, output_hidden_states=True)
 
           kl_targets = teacher_out["logits"]
+          kl_targets = kl_targets.detach()
 
-          kl = kl_div(kl_inputs, kl_targets, t)
+          kl = kl_div(logits, kl_targets, t, k=c.top_k)
 
           # optional
           ############# cosine loss ###############
@@ -209,8 +166,8 @@ def train(model_config, train_config):
 
           cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
 
-          # loss = (ce_loss + kl + cl) / 3  # change this to just ce and kl
-          loss = ce_loss
+          loss = (ce_loss + kl) / 2  
+          #loss = ce_loss
           loss = loss / c.gradient_accumulation_steps
 
           #if torch.isnan(loss):
@@ -237,28 +194,38 @@ def train(model_config, train_config):
 
           steps += 1
           if steps % c.save_steps == 0:
-              print(f"saving model at step: {steps}")
-              torch.save(model.state_dict(), save_path)
+              if master_rank:
+                print(f"saving model at step: {steps} to file {c.save_path}...")
+                torch.save(model.state_dict(), c.save_path)
+                
+              if c.ddp:
+                # blocking
+                dist.barrier()
+                
 
           if steps % c.log_steps == 0:
               lossf = c.gradient_accumulation_steps * loss.item()
               dt = (time.time() - start) / (steps+1e-05)
               left = dt * (training_steps - steps) / 60
-              print(
-                  f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
-              )
+
+              if master_rank:
+                print(
+                    f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
+                )
+
 
           if c.wandb_report:
-            wandb.log(
-                {
-                    "loss": c.gradient_accumulation_steps * loss.item(),
-                    "ce": ce_loss,
-                    "ppl": 2**ce_loss,
-                    "kl": kl,
-                    "cosine": cl,  # /math.sqrt(config.n_embd),
-                    "lr": scheduler.get_last_lr()[0],
-                }
-            )
+            if master_rank:
+              wandb.log(
+                  {
+                      "loss": c.gradient_accumulation_steps * loss.item(),
+                      "ce": ce_loss,
+                      "ppl": 2**ce_loss,
+                      "kl": kl,
+                      "cosine": cl,  # /math.sqrt(config.n_embd),
+                      "lr": scheduler.get_last_lr()[0],
+                  }
+              )
 
 
   stop = time.time()
@@ -266,6 +233,7 @@ def train(model_config, train_config):
 
 
 if __name__ == "__main__":
+  setup()
   train(config, train_config)
   cleanup()
 

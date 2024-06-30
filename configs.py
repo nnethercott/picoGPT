@@ -38,9 +38,14 @@ class TrainConfig:
     log_steps: int = 1
     grad_clip: Optional[float] = None
     weight_decay: float = 0.0
-    lr: float = 1e-04
+    lr: float = 1e-03
+    min_lr: float = 1e-05
     distill_temperature: float = 1.0
+    top_k: Optional[int] = None,
     wandb_project: Optional[str] = None
     wandb_entity: Optional[str] = None 
     wandb_report: bool = False
     ckpt_path: Optional[str] = None
+    save_path: Optional[str] = None
+    ddp: bool = False
+    teacher_model_id: Optional[str] = None
