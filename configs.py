@@ -22,7 +22,6 @@ class Config:
     norm_eps: float = 1e-05
     tie_weights: bool = True
     neftune_noise_alpha: float = 0.0
- 
 
     @property 
     def head_size(self):
@@ -35,7 +34,8 @@ class TrainConfig:
     warmup_ratio: float = 0.03
     batch_size: int = 16
     gradient_accumulation_steps: int = 1
-    log_ratio: float = 0.05
+    save_steps: int = 100
+    log_steps: int = 1
     grad_clip: Optional[float] = None
     weight_decay: float = 0.0
     lr: float = 1e-04
@@ -43,3 +43,4 @@ class TrainConfig:
     wandb_project: Optional[str] = None
     wandb_entity: Optional[str] = None 
     wandb_report: bool = False
+    ckpt_path: Optional[str] = None
