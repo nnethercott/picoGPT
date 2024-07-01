@@ -196,7 +196,7 @@ def train(model_config, train_config):
           if steps % c.save_steps == 0:
               if master_rank:
                 print(f"saving model at step: {steps} to file {c.save_path}...")
-                torch.save(model.state_dict(), c.save_path)
+                torch.save(model.module.state_dict(), c.save_path)
                 
               if c.ddp:
                 # blocking
@@ -233,15 +233,20 @@ def train(model_config, train_config):
 
 
 if __name__ == "__main__":
-  setup()
-  train(config, train_config)
-  cleanup()
+  # setup()
+  # train(config, train_config)
+  device = "cuda"
+  config.block_size = 256
+  model = PicoGPT(config).to(device)
 
-# quick inference
-#model.to(device)
-#prompt = "A man"
-#input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
-#generated = model.generate(
-#    input_ids, do_sample=True, max_new_tokens=128, temperature=0.8, top_k=16
-#)
-#print(tok.decode(generated, skip_special_tokens=True))
+  model.load_state_dict(torch.load("./checkpoints/pico_tinyllama_10_noddp.pt"))
+
+  prompt = "The Dark Knight is"
+  input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
+  generated = model.generate(
+      input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
+  )
+  print(tok.decode(generated, skip_special_tokens=True))
+
+  # cleanup()
+
