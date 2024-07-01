@@ -134,11 +134,11 @@ def train(model_config, train_config):
   for epoch in range(c.n_epochs):
       for e, mini_batch in enumerate(dl):
           mini_batch = mini_batch.to("cuda")
-          out = model(mini_batch)
+          out = model(mini_batch['input_ids'])
           logits = out["logits"]
 
-          # NOTE: if instruction tuning we need to omit loss for instruction input
-          # TODO: change dataloader collator... 
+          #TODO: masked_fill_ for prompt tokens in loss
+
           ############# ce #####################
           ce_logits = logits[:, :-1].reshape(-1, logits.shape[-1])
           targets = mini_batch[:, 1:].reshape(-1)
