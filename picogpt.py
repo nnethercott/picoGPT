@@ -1,4 +1,3 @@
-#TODO: create dataset.py
 import functools
 import time
 import math
@@ -38,35 +37,35 @@ tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
 config = Config(
     vocab_size=len(tok),
-    block_size=128,
+    block_size=384,
     n_layer=5,
     n_embd=2048,
     n_head=16,
     n_query_groups=4,
     tie_weights=True,
     rope_theta=10000,
-    neftune_noise_alpha=0.0,
+    neftune_noise_alpha=0.1,
     dropout=0.1,
 )
 
 train_config = TrainConfig(
     n_epochs=1,
-    batch_size=8,
+    batch_size=1,
     lr=1e-04,
-    min_lr = 2e-05, 
-    gradient_accumulation_steps=4,
+    min_lr = 1e-05, 
+    gradient_accumulation_steps=6,
     warmup_ratio=0.03,
     grad_clip=1.0,
     weight_decay=0.1,
-    save_steps = 1000,
+    save_steps = 10000,
     log_steps = 50,
     wandb_report = True,
     wandb_entity = "nnethercott",
     wandb_project = "picoGPT",
     distill_temperature=1.2,
     top_k = 48,
-    ckpt_path = "./checkpoints/pico_tinyllama_9.pt",
-    save_path = "./checkpoints/pico_tinyllama_10.pt",
+    ckpt_path = "./checkpoints/pico_tinyllama_10_pretrain.pt",
+    save_path = "./checkpoints/pico_tinyllama_code_pretrain.pt",
     teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ddp = True,
 )
@@ -88,7 +87,16 @@ def load_teacher(teacher_model_id):
 def train(model_config, train_config):
   c = train_config
 
-  dl = load_training_data(model_config, train_config, tok, rank = int(os.getenv("LOCAL_RANK")))
+  #dl = load_training_data(model_config, train_config, tok, rank = int(os.getenv("LOCAL_RANK")))
+  starcoder = load_starcoder("python", tok, rank = int(os.getenv("LOCAL_RANK")))
+  slimpajama = load_slimpajama(tok, rank = int(os.getenv("LOCAL_RANK")))
+  ds = InterpolatedDataset(
+    {'data': starcoder, 'target_ratio': 1, 'is_main': False},
+    {'data': slimpajama, 'target_ratio': 4, 'is_main': True}
+  ).generate(saturation_steps = 200000)
+
+  dl = DataLoader(ds, batch_size = 1, shuffle = False, collate_fn = sft_collate_fn)
+
   training_steps = int(len(dl) * c.n_epochs)
   warmup_steps = int(c.warmup_ratio * training_steps)
 
@@ -133,8 +141,9 @@ def train(model_config, train_config):
   steps = 0
   for epoch in range(c.n_epochs):
       for e, mini_batch in enumerate(dl):
-          mini_batch = mini_batch.to("cuda")
-          out = model(mini_batch['input_ids'])
+          #FIXME: todo later
+          mini_batch = mini_batch['input_ids'].to(device)
+          out = model(mini_batch)
           logits = out["logits"]
 
           #TODO: masked_fill_ for prompt tokens in loss
@@ -233,20 +242,23 @@ def train(model_config, train_config):
 
 
 if __name__ == "__main__":
-  # setup()
-  # train(config, train_config)
-  device = "cuda"
-  config.block_size = 256
-  model = PicoGPT(config).to(device)
+  setup()
+  train(config, train_config)
+  cleanup()
+  #device = "cuda"
+  #config.block_size = 256
+  #device = "cuda"
+  #model = PicoGPT(config).to(device)
 
-  model.load_state_dict(torch.load("./checkpoints/pico_tinyllama_10_noddp.pt"))
+  #model.load_state_dict(torch.load("./checkpoints/test_mixed_train.pt"))
 
-  prompt = "The Dark Knight is"
-  input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
-  generated = model.generate(
-      input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
-  )
-  print(tok.decode(generated, skip_special_tokens=True))
+  #prompt = "```python\ndef hello_world(): "
+# # prompt = "A man once "
+  #input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
+  #generated = model.generate(
+  #    #input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
+  #    input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=1, repetition_penalty=1.2,
+  #)[0]
+  #print(tok.decode(generated, skip_special_tokens=True))
 
-  # cleanup()
 

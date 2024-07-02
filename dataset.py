@@ -22,7 +22,7 @@ def sft_collate_fn(inputs):
   inputs = inputs[0]
   return {
     'prompt_len': inputs['prompt_len'],
-    'tokens': torch.tensor(inputs['input_ids']).unsqueeze(0) # bsz 1 
+    'input_ids': torch.tensor(inputs['input_ids']).unsqueeze(0) # bsz 1 
     }
 
 class CustomDataset(torch.utils.data.Dataset):
@@ -41,7 +41,7 @@ def load_starcoder(lang, tok, rank = 0):
   # NOTE: do tok(prompt+answer) and len(tok(prompt))
 
   data = load_dataset("bigcode/starcoderdata", data_dir=lang, split="train", streaming=True)
-  BLOCK_SIZE = 200
+  BLOCK_SIZE = 1500000
   data = data.skip(BLOCK_SIZE*rank).take(BLOCK_SIZE)
 
   def dataset_generator(dataset):
@@ -76,8 +76,8 @@ def load_starcoder(lang, tok, rank = 0):
 
 def load_slimpajama(tok, rank=0):
   data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-  BLOCK_SIZE=200
-  texts = data.skip(0+rank*BLOCK_SIZE).take(BLOCK_SIZE)
+  BLOCK_SIZE=1500000
+  texts = data.skip(4000000+rank*BLOCK_SIZE).take(BLOCK_SIZE)
 
   # preprocessing
   # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
@@ -153,10 +153,10 @@ class InterpolatedDataset:
     return CustomDataset(merged_data)
 
 
-from transformers import AutoTokenizer 
-tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-starcoder = load_starcoder("python", tok)
-slimpajama = load_slimpajama(tok)
-
-ds = InterpolatedDataset({'data': starcoder, 'target_ratio':1, 'is_main': False}, {'data': slimpajama, 'target_ratio': 2, 'is_main': True})
+#from transformers import AutoTokenizer 
+#tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+#starcoder = load_starcoder("python", tok)
+#slimpajama = load_slimpajama(tok)
+#
+#ds = InterpolatedDataset({'data': starcoder, 'target_ratio':1, 'is_main': False}, {'data': slimpajama, 'target_ratio': 2, 'is_main': True})
 

@@ -192,7 +192,7 @@ class PicoGPT(nn.Module):
         return optimizer
 
 
-    def generate(self, input_ids, max_new_tokens = 64, temperature = 1.0, top_k = None, do_sample = False, eos_token_id = -1, num_beams = 1, num_return_sequences=1):
+    def generate(self, input_ids, max_new_tokens = 64, temperature = 1.0, top_k = None, do_sample = False, eos_token_id = -1, num_beams = 1, num_return_sequences=1, repetition_penalty=1):
         new_tokens = [] 
 
         self.eval()
@@ -213,7 +213,13 @@ class PicoGPT(nn.Module):
                     new_tokens.append(next_token.item())
 
                 else: #greedy search subset of beam search 
-                    new_tokens = self._beam_search(input_ids, max_new_tokens, num_beams, num_return_sequences)
+                    new_tokens = self._beam_search(input_ids, 
+                      max_new_tokens=max_new_tokens  , 
+                      num_beams=num_beams, 
+                      num_return_sequences=num_return_sequences, 
+                      eos_token_id=eos_token_id, 
+                      repetition_penalty=repetition_penalty
+                    )
                     return new_tokens
 
                 # append 
@@ -226,11 +232,12 @@ class PicoGPT(nn.Module):
 
     
 
-    # TODO: handle eos token generated case
-    def _beam_search(self, input_ids, max_new_tokens=100, num_beams=1, num_return_sequences=1):
+    def _beam_search(self, input_ids, max_new_tokens=100, num_beams=1, num_return_sequences=1, eos_token_id=-1, repetition_penalty=1.0):
         size = input_ids.shape[1]
 
         beams = [{'cum_log_prob': 0., 'ids': input_ids}] 
+        stopped_beams = []
+        seen_tokens = set() 
         
         for _ in range(max_new_tokens):
             new_beams = [] 
@@ -238,20 +245,41 @@ class PicoGPT(nn.Module):
             for beam in beams:
                 # truncate 
                 logits = self.forward(beam['ids'][:,-self.config.block_size:])['logits']
-                probs = F.log_softmax(logits[:,-1,:], dim=-1) #avoid underflow 
-                ps, ids = torch.topk(probs, k=num_beams)
-
-                ps = ps.squeeze(0)
+                
+                #TODO: move to its own file
+                # repetition penalty 
+                logits = logits[:,-1,:]
+                mask = torch.zeros(logits.shape[-1], dtype=torch.bool, device=logits.device)
+                mask[list(seen_tokens)] = True 
+                scale = torch.ones_like(mask, device=logits.device, dtype=torch.float32)
+                scale.masked_fill_(mask, 1/repetition_penalty)
+                logits*=scale  
+                
+                log_probs = F.log_softmax(logits, dim=-1) #avoid underflow 
+                log_ps, ids = torch.topk(log_probs, k=num_beams)
+                log_ps = log_ps.squeeze(0)
                 ids = ids.squeeze(0)
 
                 # log(p1*p2*p3) = log(p1)+log(p2)+log(p3)
-                for p,i in zip(ps, ids):
-                    new_beams.append({'cum_log_prob': beam['cum_log_prob'] + p, 'ids': torch.cat((beam['ids'], i.view(1,1)), dim=-1)})
+                for lp,i in zip(log_ps, ids):
+                    new_beams.append({'cum_log_prob': beam['cum_log_prob'] + lp, 'ids': torch.cat((beam['ids'], i.view(1,1)), dim=-1)})
+
+                    #update seen tokens for `repetition_penalty` 
+                    seen_tokens.add(i.item())
                     
             beams = new_beams
 
             # keep `num_beams`
             beams = sorted(beams, key = lambda x: x['cum_log_prob'], reverse = True)[:num_beams]
+
+            #TODO: think about this
+            #check if any sequences terminated, decrement num_beams ?
+            for idx, beam in enumerate(beams):
+              if beam['ids'][:,-1] == eos_token_id:
+                stopped_beams.append(beams.pop(idx))
+
+        beams += stopped_beams 
+        beams = sorted(beams, key = lambda x: x['cum_log_prob'], reverse = True)[:num_beams]
 
         return [beam['ids'][:,size:].squeeze(0) for beam in beams[:num_return_sequences]]
 
