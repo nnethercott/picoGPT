@@ -1,10 +1,12 @@
-from torch.utils.data import DataLoader, Dataset
-import datasets
-from datasets import load_dataset, interleave_datasets
-import torch 
 import functools
-import random 
-import re 
+import random
+import re
+
+import datasets
+import torch
+from datasets import interleave_datasets, load_dataset
+from torch.utils.data import DataLoader, Dataset
+
 
 def remove_lines_with_substrings(text, substrings):
     # Create a regex pattern that matches lines containing any of the substrings
@@ -37,30 +39,61 @@ class CustomDataset(torch.utils.data.Dataset):
 
 
 def load_starcoder(lang, tok, rank = 0):
-  # here `text` key in return dict is prompt+answer
-  # NOTE: do tok(prompt+answer) and len(tok(prompt))
+    # here `text` key in return dict is prompt+answer
+    # NOTE: do tok(prompt+answer) and len(tok(prompt))
 
-  data = load_dataset("bigcode/starcoderdata", data_dir=lang, split="train", streaming=True)
-  BLOCK_SIZE = 1500000
-  data = data.skip(BLOCK_SIZE*rank).take(BLOCK_SIZE)
+    data = load_dataset("bigcode/starcoderdata", data_dir=lang, split="train", streaming=True)
+    BLOCK_SIZE = 1500000
+    data = data.skip(BLOCK_SIZE*rank).take(BLOCK_SIZE)
 
-  def dataset_generator(dataset):
+    def dataset_generator(dataset):
       yield from dataset
 
-  data = datasets.Dataset.from_generator(functools.partial(dataset_generator, data))
-  data = data.map(
+    data = datasets.Dataset.from_generator(functools.partial(dataset_generator, data))
+    data = data.map(
       lambda x: {**x, "input_ids": [tok.encode(remove_lines_with_substrings(y, ["<gh_stars>", "<filename>"]))+[tok.eos_token_id] for y in x["content"]]},
       batched=True,
-  )
-  data = data.filter(
+    )
+    data = data.filter(
       lambda x: [len(y) <= 384 and len(y)>16 for y in x["input_ids"]], batched=True
-  )
-  
-  data = [{'prompt_len': 0, 'input_ids':i} for i in data['input_ids']]
-  ds = CustomDataset(data)
+    )
 
-  return ds
+    data = [{'prompt_len': 0, 'input_ids':i} for i in data['input_ids']]
+    ds = CustomDataset(data)
 
+    return ds
+
+def load_alpaca_instruct(tok, rank = 0):
+    data = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
+    # some entries contain 'input': Not available -> just filter to empty 
+    def apply_convo(examples):
+        inputs = ['' if i.startswith('Not') else i for i in examples['input']]
+        outputs = examples['output']
+        instruction = examples['instruction']
+
+        prompts = [f'{i}\nInput: {p}\n' if len(p)!=0 else f'{i}\n' for i,p in zip(instruction, inputs)]
+        # no <EOS> token added
+        prompt_lens = [len(tok.encode(p)) for p in prompts]
+        
+        input_ids = [tok.encode(f'{p}{o}')+ [tok.eos_token_id] for p, o in zip(prompts, outputs)]
+        
+        # updata examples keys 
+        examples['prompt_len'] = prompt_lens 
+        examples['input_ids'] = input_ids
+        return examples 
+
+    data = data.map(
+        apply_convo, 
+        batched=True,
+    )
+
+    data = data.filter(
+      lambda x: [len(y) <= 512 and len(y)>16 for y in x["input_ids"]], batched=True
+    )
+
+    data = [{'prompt_len': x['prompt_len'], 'input_ids': x['input_ids']} for x in data]
+    ds = CustomDataset(data) 
+    return ds
 
 #tiny shakespeare 
 #text = load_dataset("karpathy/tiny_shakespeare")['train'][0]['text']
@@ -108,7 +141,9 @@ class InterpolatedDataset:
     each `data` is a torch.utils.data.Dataset instance, `is_main` indicates if dataset is backbone  
     """
     datasets = [*datasets]
-    assert sum([item['is_main'] for item in datasets]) == 1
+
+    # allow option to not interpolate 
+    #assert sum([item['is_main'] for item in datasets]) == 1
 
     self.datasets = datasets
 
@@ -153,10 +188,12 @@ class InterpolatedDataset:
     return CustomDataset(merged_data)
 
 
-#from transformers import AutoTokenizer 
-#tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-#starcoder = load_starcoder("python", tok)
-#slimpajama = load_slimpajama(tok)
-#
-#ds = InterpolatedDataset({'data': starcoder, 'target_ratio':1, 'is_main': False}, {'data': slimpajama, 'target_ratio': 2, 'is_main': True})
+from transformers import AutoTokenizer
+
+tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+# starcoder = load_starcoder("python", tok)
+# slimpajama = load_slimpajama(tok)
+alpaca = load_alpaca_instruct(tok)
+
+# ds = InterpolatedDataset({'data': starcoder, 'target_ratio':1, 'is_main': False}, {'data': slimpajama, 'target_ratio': 2, 'is_main': True})
 
