@@ -174,7 +174,8 @@ class PicoGPT(nn.Module):
 
         x = self.transformer.ln_f(x)
 
-        return {'logits': self.lm_head(x), 'hidden_states': hidden_states}
+        #return {'logits': self.lm_head(x), 'hidden_states': hidden_states}
+        return self.lm_head(x)
 
 
     def configure_optimizers(self, train_config):

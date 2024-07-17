@@ -1,6 +1,7 @@
 import functools
 import random
 import re
+import os
 
 import datasets
 import torch
@@ -19,11 +20,12 @@ def remove_lines_with_substrings(text, substrings):
 def collate_fn(inputs):
     return torch.tensor(inputs)
 
+# right now assumes bsz=1
 def sft_collate_fn(inputs):
   # used in batch_size = 1 training 
   inputs = inputs[0]
   return {
-    'prompt_len': inputs['prompt_len'],
+    'prompt_len': torch.tensor(inputs['prompt_len']),
     'input_ids': torch.tensor(inputs['input_ids']).unsqueeze(0) # bsz 1 
     }
 
@@ -42,9 +44,9 @@ def load_starcoder(lang, tok, rank = 0):
     # here `text` key in return dict is prompt+answer
     # NOTE: do tok(prompt+answer) and len(tok(prompt))
 
-    data = load_dataset("bigcode/starcoderdata", data_dir=lang, split="train", streaming=True)
-    BLOCK_SIZE = 1500000
-    data = data.skip(BLOCK_SIZE*rank).take(BLOCK_SIZE)
+    data = load_dataset("bigcode/starcoderdata", data_dir=lang, split="train", streaming=True, token=os.environ["HF_ACCESS_TOKEN"])
+    BLOCK_SIZE = 200000
+    data = data.skip(1500000+BLOCK_SIZE*rank).take(BLOCK_SIZE)
 
     def dataset_generator(dataset):
       yield from dataset
@@ -55,7 +57,7 @@ def load_starcoder(lang, tok, rank = 0):
       batched=True,
     )
     data = data.filter(
-      lambda x: [len(y) <= 384 and len(y)>16 for y in x["input_ids"]], batched=True
+      lambda x: [len(y) <= 384 and len(y)>=16 for y in x["input_ids"]], batched=True
     )
 
     data = [{'prompt_len': 0, 'input_ids':i} for i in data['input_ids']]
@@ -63,8 +65,87 @@ def load_starcoder(lang, tok, rank = 0):
 
     return ds
 
-def load_alpaca_instruct(tok, rank = 0):
+
+def load_evol_py(tok, rank = 0, world_size = 1):
+    data = load_dataset("mlabonne/Evol-Instruct-Python-26k", split="train")
+
+    #filter to samples containing code
+    data = data.filter(lambda x: len(re.findall(r'```(.*?)```', x['output'], re.DOTALL))>0)
+
+    def apply_convo(examples):
+        #filter out explanations, only keep the code 
+        outputs = [re.findall(r'```(.*?)```', o, re.DOTALL)[0] for o in examples['output']]
+        #outputs = ["ASSISTANT: " + re.sub(r'python','', o) for o in outputs]
+        outputs = [re.sub(r'python','', o) for o in outputs]
+
+        # no comments pls
+        outputs = [re.sub(r'^\s*#.*\n?', '', o, flags=re.MULTILINE) for o in outputs]
+
+        #prompts = ["USER: "+ i +'\n' for i in examples['instruction']]
+        prompts = [i +'\n\n' for i in examples['instruction']]
+
+        prompt_lens = [len(tok.encode(p)) for p in prompts]
+        input_ids = [tok.encode(f'{p}{o}')+ [tok.eos_token_id] for p, o in zip(prompts, outputs)]
+        
+        # updata examples keys 
+        examples['prompt_len'] = prompt_lens 
+        examples['input_ids'] = input_ids
+        return examples 
+
+    data = data.map(
+        apply_convo, 
+        batched=True,
+    )
+
+    data = data.filter(
+      lambda x: [len(y) <= 384 and len(y)>16 for y in x["input_ids"]], batched=True
+    )
+
+    data = [{'prompt_len': x['prompt_len'], 'input_ids': x['input_ids']} for x in data]
+    bsz = len(data)//world_size 
+    data = data[bsz*rank : bsz*(rank+1)]
+
+    ds = CustomDataset(data) 
+    return ds
+
+
+def load_ultrachat(tok, rank = 0, world_size = 1):
+    data = load_dataset("HuggingFaceH4/ultrachat_200k", split="train_sft")
+
+    def apply_convo(examples):
+        # each sample has potentially many conversations, let's only keep the first 
+        msgs = [msgs[:2] for msgs in examples['messages']]
+        outputs = ["ASSISTANT: " + msg[1]['content'] for msg in msgs]
+        prompts = ["USER: "+ msg[0]['content'] +'\n' for msg in msgs]
+
+        prompt_lens = [len(tok.encode(p)) for p in prompts]
+        input_ids = [tok.encode(f'{p}{o}')+ [tok.eos_token_id] for p, o in zip(prompts, outputs)]
+        
+        # updata examples keys 
+        examples['prompt_len'] = prompt_lens 
+        examples['input_ids'] = input_ids
+        return examples 
+
+    data = data.map(
+        apply_convo, 
+        batched=True,
+    )
+
+    data = data.filter(
+      lambda x: [len(y) <= 384 and len(y)>16 for y in x["input_ids"]], batched=True
+    )
+
+    data = [{'prompt_len': x['prompt_len'], 'input_ids': x['input_ids']} for x in data]
+    bsz = len(data)//world_size 
+    data = data[bsz*rank : bsz*(rank+1)]
+
+    ds = CustomDataset(data) 
+    return ds
+
+
+def load_alpaca_instruct(tok, rank = 0, world_size=1):
     data = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
+
     # some entries contain 'input': Not available -> just filter to empty 
     def apply_convo(examples):
         inputs = ['' if i.startswith('Not') else i for i in examples['input']]
@@ -72,6 +153,11 @@ def load_alpaca_instruct(tok, rank = 0):
         instruction = examples['instruction']
 
         prompts = [f'{i}\nInput: {p}\n' if len(p)!=0 else f'{i}\n' for i,p in zip(instruction, inputs)]
+       # prompts = ["USER: " + p + '\n' for p in prompts]
+       # outputs = ["ASSISTANT: " + o for o in outputs]
+        prompts = [p + '\n\n' for p in prompts]
+        outputs = [o for o in outputs]
+
         # no <EOS> token added
         prompt_lens = [len(tok.encode(p)) for p in prompts]
         
@@ -88,10 +174,13 @@ def load_alpaca_instruct(tok, rank = 0):
     )
 
     data = data.filter(
-      lambda x: [len(y) <= 512 and len(y)>16 for y in x["input_ids"]], batched=True
+      lambda x: [len(y) <= 384 and len(y)>16 for y in x["input_ids"]], batched=True
     )
 
     data = [{'prompt_len': x['prompt_len'], 'input_ids': x['input_ids']} for x in data]
+    bsz = len(data)//world_size 
+    data = data[bsz*rank : bsz*(rank+1)]
+
     ds = CustomDataset(data) 
     return ds
 
@@ -109,8 +198,8 @@ def load_alpaca_instruct(tok, rank = 0):
 
 def load_slimpajama(tok, rank=0):
   data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-  BLOCK_SIZE=1500000
-  texts = data.skip(4000000+rank*BLOCK_SIZE).take(BLOCK_SIZE)
+  BLOCK_SIZE=200000
+  texts = data.skip(8000000+rank*BLOCK_SIZE).take(BLOCK_SIZE)
 
   # preprocessing
   # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
@@ -123,7 +212,7 @@ def load_slimpajama(tok, rank=0):
       batched=True,
   )
   texts = texts.filter(
-      lambda x: [len(y) > 16 and len(y)<=384 for y in x["tokens"]], batched=True
+      lambda x: [len(y) >= 16 and len(y)<=384 for y in x["tokens"]], batched=True
   )
   tokens = texts["tokens"]
   data = [{'prompt_len': 0, 'input_ids': t} for t in tokens]
@@ -193,7 +282,9 @@ from transformers import AutoTokenizer
 tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 # starcoder = load_starcoder("python", tok)
 # slimpajama = load_slimpajama(tok)
-alpaca = load_alpaca_instruct(tok)
+# alpaca = load_alpaca_instruct(tok)
+# chat = load_ultrachat(tok)
+evol = load_evol_py(tok)
 
 # ds = InterpolatedDataset({'data': starcoder, 'target_ratio':1, 'is_main': False}, {'data': slimpajama, 'target_ratio': 2, 'is_main': True})
 

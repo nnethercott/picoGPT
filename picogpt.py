@@ -37,35 +37,36 @@ tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
 config = Config(
     vocab_size=len(tok),
-    block_size=384,
+    block_size=512,
     n_layer=5,
     n_embd=2048,
     n_head=16,
     n_query_groups=4,
     tie_weights=True,
     rope_theta=10000,
-    neftune_noise_alpha=0.1,
+    neftune_noise_alpha=1.0,
     dropout=0.1,
 )
 
 train_config = TrainConfig(
     n_epochs=1,
     batch_size=1,
-    lr=1e-04,
+    lr=3e-05,
     min_lr = 1e-05, 
-    gradient_accumulation_steps=6,
+    gradient_accumulation_steps=8,
     warmup_ratio=0.03,
     grad_clip=1.0,
     weight_decay=0.1,
-    save_steps = 10000,
+    save_steps = 3000,
     log_steps = 50,
     wandb_report = True,
     wandb_entity = "nnethercott",
     wandb_project = "picoGPT",
-    distill_temperature=1.2,
-    top_k = 48,
-    ckpt_path = "./checkpoints/pico_tinyllama_10_pretrain.pt",
-    save_path = "./checkpoints/pico_tinyllama_code_pretrain.pt",
+    distill_temperature=1.3,
+    top_k = 64,
+    ckpt_path = "./checkpoints/pico_tinyllama_pretrain.pt",
+    #ckpt_path  = "./checkpoints/pico_tinyllama_code_pretrain.pt",
+    save_path = "/mnt/nate/pico_checkpoints/pico_tinyllama_pretrain2.pt",
     teacher_model_id = "TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ddp = True,
 )
@@ -87,14 +88,22 @@ def load_teacher(teacher_model_id):
 def train(model_config, train_config):
   c = train_config
 
-  #dl = load_training_data(model_config, train_config, tok, rank = int(os.getenv("LOCAL_RANK")))
   starcoder = load_starcoder("python", tok, rank = int(os.getenv("LOCAL_RANK")))
   slimpajama = load_slimpajama(tok, rank = int(os.getenv("LOCAL_RANK")))
+  
+  #alpaca = load_alpaca_instruct(tok, rank = int(os.getenv("LOCAL_RANK")), world_size = int(os.getenv("WORLD_SIZE")))
+  #evol = load_evol_py(tok, rank = int(os.getenv("LOCAL_RANK")), world_size = int(os.getenv("WORLD_SIZE")))
+  #chat = load_ultrachat(tok, rank = int(os.getenv("LOCAL_RANK")), world_size = int(os.getenv("WORLD_SIZE")))
+  
   ds = InterpolatedDataset(
-    {'data': starcoder, 'target_ratio': 1, 'is_main': False},
-    {'data': slimpajama, 'target_ratio': 4, 'is_main': True}
-  ).generate(saturation_steps = 200000)
+    {'data': starcoder, 'target_ratio': 1, 'is_main': True},
+    {'data': slimpajama, 'target_ratio': 2, 'is_main': True},
+    #{'data': alpaca, 'target_ratio': 1, 'is_main': True},
+    #{'data': evol, 'target_ratio': 1, 'is_main': True},
+    #{'data': chat, 'target_ratio': 5, 'is_main': True}
+  ).generate(saturation_steps = 1)
 
+  #ds = load_alpaca_instruct(tok, rank = int(os.getenv("LOCAL_RANK")))
   dl = DataLoader(ds, batch_size = 1, shuffle = False, collate_fn = sft_collate_fn)
 
   training_steps = int(len(dl) * c.n_epochs)
@@ -115,7 +124,8 @@ def train(model_config, train_config):
 
     # optimizers 
     optimizer = model.configure_optimizers(train_config)
-    scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
+    #scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x: 1.0)
 
     model = DDP(model, device_ids = [rank])
 
@@ -141,16 +151,21 @@ def train(model_config, train_config):
   steps = 0
   for epoch in range(c.n_epochs):
       for e, mini_batch in enumerate(dl):
-          #FIXME: todo later
-          mini_batch = mini_batch['input_ids'].to(device)
-          out = model(mini_batch)
+          input_ids = mini_batch['input_ids'].to(device)
+          prompt_len = mini_batch['prompt_len'].to(device)
+          out = model(input_ids)
           logits = out["logits"]
-
-          #TODO: masked_fill_ for prompt tokens in loss
 
           ############# ce #####################
           ce_logits = logits[:, :-1].reshape(-1, logits.shape[-1])
-          targets = mini_batch[:, 1:].reshape(-1)
+
+          # masked fill instruct tokens
+          targets = input_ids[:, 1:].clone().reshape(-1)
+          y = torch.arange(targets.shape[-1], device = targets.device)
+          mask = y<(prompt_len-1).repeat(y.shape)
+          targets.masked_fill_(mask, -100)
+
+          #print(tok.decode(targets[prompt_len:]))
 
           ce_loss = F.cross_entropy(ce_logits, targets, reduction="mean")
 
@@ -158,22 +173,23 @@ def train(model_config, train_config):
           # https://pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html
           t = c.distill_temperature
           with torch.no_grad():
-              teacher_out = teacher(mini_batch, output_hidden_states=True)
+              teacher_out = teacher(input_ids, output_hidden_states=True)
 
           kl_targets = teacher_out["logits"]
           kl_targets = kl_targets.detach()
 
+          #TODO: potentially remove prompt tokens from kl loss
           kl = kl_div(logits, kl_targets, t, k=c.top_k)
 
           # optional
           ############# cosine loss ###############
-          hidden_states = out["hidden_states"]
-          teacher_hidden_states = teacher_out["hidden_states"]
+          #hidden_states = out["hidden_states"]
+          #teacher_hidden_states = teacher_out["hidden_states"]
 
-          hidden_states = [s.to(device) for s in hidden_states]
-          teacher_hidden_states = [s.to(device) for s in teacher_hidden_states]
+          #hidden_states = [s.to(device) for s in hidden_states]
+          #teacher_hidden_states = [s.to(device) for s in teacher_hidden_states]
 
-          cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
+          #cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
 
           loss = (ce_loss + kl) / 2  
           #loss = ce_loss
@@ -202,8 +218,8 @@ def train(model_config, train_config):
           scheduler.step()
 
           steps += 1
-          if steps % c.save_steps == 0:
-              if master_rank:
+          if steps % c.save_steps == 0 or steps == training_steps:
+              if master_rank and c.save_path is not None:
                 print(f"saving model at step: {steps} to file {c.save_path}...")
                 torch.save(model.module.state_dict(), c.save_path)
                 
@@ -221,6 +237,9 @@ def train(model_config, train_config):
                 print(
                     f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
                 )
+                #print(
+                #    f"iter {steps}/{training_steps} | ce {ce_loss.item():.4f} | kl: {kl.item():.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
+                #)
 
 
           if c.wandb_report:
@@ -231,7 +250,7 @@ def train(model_config, train_config):
                       "ce": ce_loss,
                       "ppl": 2**ce_loss,
                       "kl": kl,
-                      "cosine": cl,  # /math.sqrt(config.n_embd),
+                      #"cosine": cl,  # /math.sqrt(config.n_embd),
                       "lr": scheduler.get_last_lr()[0],
                   }
               )
@@ -245,20 +264,30 @@ if __name__ == "__main__":
   setup()
   train(config, train_config)
   cleanup()
+
   #device = "cuda"
-  #config.block_size = 256
+  #config.block_size = 512
   #device = "cuda"
   #model = PicoGPT(config).to(device)
+  #model.eval() #turn off neftune
 
-  #model.load_state_dict(torch.load("./checkpoints/test_mixed_train.pt"))
+  #model.load_state_dict(torch.load("./checkpoints/pico_instruct.pt"))
 
-  #prompt = "```python\ndef hello_world(): "
-# # prompt = "A man once "
+  #template = "{prompt}\n\n"
+  #prompt = "Write a function which generates a bar plot with title 'nate is cool`."
+  #prompt = template.format(prompt = prompt)
+  #
   #input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
+  #now = time.time()
   #generated = model.generate(
-  #    #input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
-  #    input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=1, repetition_penalty=1.2,
-  #)[0]
-  #print(tok.decode(generated, skip_special_tokens=True))
+  #    input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
+  #    #input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
+  #)
+  #print(f'elapsed: {time.time()-now}')
 
+  #print(prompt)
 
+  #print(tok.decode(generated))
+#  for g in generated:
+#    print(tok.decode(g, skip_special_tokens=True).strip())
+#    print("------------------------")
