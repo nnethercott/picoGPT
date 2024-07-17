@@ -1,0 +1,7 @@
+config==0.5.1
+datasets==2.20.0
+pytest==8.2.2
+rotary_embedding_torch==0.6.2
+toktokenizer==0.2.0
+transformers==4.41.2
+wandb==0.17.3
