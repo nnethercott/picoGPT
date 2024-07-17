@@ -45,9 +45,7 @@ class CausalSelfAttention(nn.Module):
         ) * config.head_size  # n_head per query + (k+v)*n_query_groups
 
         self.c_attn = config.linear_cls(config.n_embd, shape, bias=config.bias)
-        # self.c_attn = nn.Linear(config.n_embd, shape, bias = config.bias)
         self.attn_dropout = nn.Dropout(config.dropout)
-        # self.proj = nn.Linear(config.head_size*config.n_head, config.n_embd, bias = config.bias)
         self.proj = config.linear_cls(
             config.head_size * config.n_head, config.n_embd, bias=config.bias
         )
@@ -123,14 +121,13 @@ class CausalSelfAttention(nn.Module):
         attn_mask = attn_mask @ attn_mask.transpose(-1, -2)
         attn_mask = attn_mask.to(dtype=torch.bool) & self.bias[:, :, :T, :T]
 
+        # print((attn_mask[:, -1, :, :]).to(torch.float32))
+
         # fill with -inf
         attn_mask = attn_mask.to(dtype=torch.float32)
         attn_mask.masked_fill_(attn_mask == 0, torch.finfo(torch.float32).min)  # nice
 
-        print(attn_mask)
-
         if self.flash:
-            print(attn_mask)
             y = F.scaled_dot_product_attention(
                 q,
                 k,
@@ -207,10 +204,7 @@ class PicoGPT(nn.Module):
 
         return n_params
 
-    def forward(self, x):
-        attn_mask = x["attn_mask"]
-        x = x["input_ids"]
-
+    def forward(self, x, attn_mask=None):
         assert (
             x.shape[1] <= self.config.block_size
         ), f"cannot forward seq of length {x.shape[1]}. max `block_size` configured to {self.config.block_size}"
@@ -227,8 +221,8 @@ class PicoGPT(nn.Module):
 
         x = self.transformer.ln_f(x)
 
-        # return {'logits': self.lm_head(x), 'hidden_states': hidden_states}
-        return self.lm_head(x)
+        return {"logits": self.lm_head(x), "hidden_states": hidden_states}
+        # return self.lm_head(x)
 
     def configure_optimizers(self, train_config):
         param_dict = {pn: p for pn, p in self.named_parameters()}

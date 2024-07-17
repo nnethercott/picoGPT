@@ -3,6 +3,34 @@
 ![alt text](https://github.com/nnethercott/picoGPT/blob/main/media/picoGPT.png?raw=true)
 smaller implementation of karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT/tree/9755682b981a45507f6eb9b11eadef8cb83cebd5) with a few changes.
 
+# Usage
+
+```python
+from configs import Config
+from model import PicoGPT
+
+config = Config(
+    vocab_size=len(tok),
+    block_size=128,
+    n_layer=1,
+    n_embd=128,
+    n_head=1,
+    n_query_groups=1,
+    tie_weights=True,
+    rope_theta=10000,
+    neftune_noise_alpha=1.0,
+    dropout=0.1,
+)
+
+model = PicoGPT(model_config).to(device)
+
+# load pretrained checkpoint with
+model.load_state_dict(torch.load(your_ckpt_path))
+
+#TODO: add tokenizer fwd call or model.generate()
+
+```
+
 ## todos
 
 - [x] [NEFTune](https://arxiv.org/abs/2310.05914)
@@ -11,11 +39,11 @@ smaller implementation of karpathy's [nanoGPT](https://github.com/karpathy/nanoG
 - [x] [RMSNorm](https://arxiv.org/abs/1910.07467)
 - [x] [Knowledge distillation (student-teacher learning)](https://arxiv.org/abs/1503.02531)
 - [x] Cosine embedding loss
-- [ ] Attention mask & padding 
-- [ ] DDP
+- [x] Attention mask & padding (dynamic)
+- [x] DDP
 - [ ] mixed-precision
-- [ ] DPO 
-- [ ] quantization: [nf4](https://arxiv.org/abs/2305.14314), [1bit](https://github.com/kyegomez/BitNet) 
+- [ ] DPO
+- [ ] quantization: [nf4](https://arxiv.org/abs/2305.14314), [1bit](https://github.com/kyegomez/BitNet)
 - [ ] [slerp](https://en.wikipedia.org/wiki/Slerp)
 
 ## tiny-shakespeare
@@ -69,7 +97,6 @@ Madam.' God forbid your grace
 Is very tongue of honour in this world;
 How far best hope of it, weal is told.
 ```
-
 
 ## todos
 

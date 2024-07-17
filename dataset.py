@@ -8,6 +8,10 @@ import torch
 from datasets import interleave_datasets, load_dataset
 from torch.utils.data import DataLoader, Dataset
 
+# pad token def from llama tokenizer
+PAD_TOKEN = "</s>"
+PAD_TOKEN_ID = 2
+
 
 def remove_lines_with_substrings(text, substrings):
     # Create a regex pattern that matches lines containing any of the substrings
@@ -21,7 +25,7 @@ def remove_lines_with_substrings(text, substrings):
 
 
 # right now assumes bsz=1
-def sft_collate_fn(inputs, tok):
+def sft_collate_fn(inputs):
     """
     dynamically pads input tensors and constructs attn mask
     """
@@ -30,16 +34,16 @@ def sft_collate_fn(inputs, tok):
     input_ids = inputs["input_ids"]
     prompt_len = inputs["prompt_len"]
 
-    max_len = max((len(i) for i in input_ids))
+    # needed for masking PAD loss in train
+    seq_len = [len(i) for i in input_ids]
+    max_len = max(seq_len)
 
     # pad inputs and create attention mask
     input_ids_t = [
-        torch.tensor(i + [tok.pad_token_id] * (max_len - len(i))).unsqueeze(0)
+        torch.tensor(i + [PAD_TOKEN_ID] * (max_len - len(i))).unsqueeze(0)
         for i in input_ids
     ]
     input_ids_t = torch.cat(input_ids_t, 0)
-
-    prompt_len_t = torch.tensor(prompt_len)
 
     pos = torch.arange(max_len).unsqueeze(0).repeat((input_ids_t.shape[0], 1))
     seq_end = (
@@ -48,7 +52,8 @@ def sft_collate_fn(inputs, tok):
     attn_mask = (pos < seq_end).to(dtype=torch.int8)
 
     return {
-        "prompt_len": prompt_len_t,
+        "prompt_len": torch.tensor(prompt_len),
+        "seq_len": torch.tensor(seq_len),
         "input_ids": input_ids_t,
         "attn_mask": attn_mask,
         # "pos": pos,
@@ -107,7 +112,7 @@ def load_starcoder(lang, tok, rank=0):
 
 
 def load_evol_py(tok, rank=0, world_size=1):
-    data = load_dataset("mlabonne/Evol-Instruct-Python-26k", split="train")
+    data = load_dataset("mlabonne/Evol-Instruct-Python-26k", split="train[:500]")
 
     # filter to samples containing code
     data = data.filter(
@@ -144,7 +149,9 @@ def load_evol_py(tok, rank=0, world_size=1):
     )
 
     data = data.filter(
-        lambda x: [len(y) <= 384 and len(y) > 16 for y in x["input_ids"]], batched=True
+        # lambda x: [len(y) <= 384 and len(y) > 16 for y in x["input_ids"]], batched=True
+        lambda x: [len(y) <= 128 for y in x["input_ids"]],
+        batched=True,
     )
 
     data = [{"prompt_len": x["prompt_len"], "input_ids": x["input_ids"]} for x in data]
@@ -380,10 +387,13 @@ if __name__ == "__main__":
     from transformers import AutoTokenizer
 
     tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+
     starcoder = load_starcoder_test(tok)
 
     dl = DataLoader(
-        starcoder, batch_size=4, collate_fn=functools.partial(sft_collate_fn, tok=tok)
+        starcoder,
+        batch_size=4,
+        collate_fn=sft_collate_fn,
     )
 
     # ds = InterpolatedDataset({'data': starcoder, 'target_ratio':1, 'is_main': False}, {'data': slimpajama, 'target_ratio': 2, 'is_main': True})
