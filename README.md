@@ -1,12 +1,32 @@
 # picoGPT
 
 ![alt text](https://github.com/nnethercott/picoGPT/blob/main/media/picoGPT.png?raw=true)
-
 smaller implementation of karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT/tree/9755682b981a45507f6eb9b11eadef8cb83cebd5) with a few changes.
+
+## todos
+
+- [x] [NEFTune](https://arxiv.org/abs/2310.05914)
+- [x] [Grouped Query Attention](https://arxiv.org/pdf/2305.13245)
+- [x] Beam search
+- [x] [RMSNorm](https://arxiv.org/abs/1910.07467)
+- [x] [Knowledge distillation (student-teacher learning)](https://arxiv.org/abs/1503.02531)
+- [x] Cosine embedding loss
+- [ ] Attention mask & padding 
+- [ ] DDP
+- [ ] mixed-precision
+- [ ] DPO 
+- [ ] quantization: [nf4](https://arxiv.org/abs/2305.14314), [1bit](https://github.com/kyegomez/BitNet) 
+- [ ] [slerp](https://en.wikipedia.org/wiki/Slerp)
 
 ## tiny-shakespeare
 
-sample output after quick fine tuning on [karpathy/tiny_shakespeare](https://huggingface.co/datasets/karpathy/tiny_shakespeare).
+sample output after fine tuning a 9.3M llama-like model on 9.5M tokens of [karpathy/tiny_shakespeare](https://huggingface.co/datasets/karpathy/tiny_shakespeare) with knowledge distillation:
+
+<!-- * `n_embd = 384`  -->
+<!-- * `n_layer = 6`  -->
+<!-- * `n_head = 4` -->
+<!-- * `n_query_groups = 2` -->
+<!-- * teacher model = [sadia72/gpt2-shakespeare](https://huggingface.co/sadia72/gpt2-shakespeare/tree/main) -->
 
 <!-- ```python -->
 <!-- config = Config( -->
@@ -49,6 +69,7 @@ Madam.' God forbid your grace
 Is very tongue of honour in this world;
 How far best hope of it, weal is told.
 ```
+
 
 ## todos
 
