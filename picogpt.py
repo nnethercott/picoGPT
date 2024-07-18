@@ -25,21 +25,21 @@ from utils import get_cosine_schedule_with_warmup
 def setup():
     dist.init_process_group("nccl")
 
-
 def cleanup():
     dist.destroy_process_group()
 
 
+# TODO: change tokenizer and teacher to phi-3
 tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 
 
 config = Config(
     vocab_size=len(tok),
-    block_size=128,
-    n_layer=1,
-    n_embd=128,
-    n_head=1,
-    n_query_groups=1,
+    block_size=512,
+    n_layer=32,
+    n_embd=784,
+    n_head=18,
+    n_query_groups=6,
     tie_weights=True,
     rope_theta=10000,
     neftune_noise_alpha=1.0,
@@ -48,7 +48,7 @@ config = Config(
 
 train_config = TrainConfig(
     n_epochs=1,
-    batch_size=1,
+    batch_size=4,
     lr=3e-05,
     min_lr=1e-05,
     gradient_accumulation_steps=8,
@@ -56,45 +56,45 @@ train_config = TrainConfig(
     grad_clip=1.0,
     weight_decay=0.1,
     save_steps=3000,
-    log_steps=50,
+    log_steps=1,
     wandb_report=False,
     wandb_entity="nnethercott",
     wandb_project="picoGPT",
     distill_temperature=1.3,
     top_k=64,
-    # ckpt_path  = "./checkpoints/pico_tinyllama_code_pretrain.pt",
-    # save_path="/mnt/nate/pico_checkpoints/pico_tinyllama_pretrain2.pt",
+    ckpt_path=None,
+    save_path="./checkpoints/slim_test.pt",
     teacher_model_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
     ddp=False,
 )
 
 
 def load_teacher(teacher_model_id):
-    # quantization_config = BitsAndBytesConfig(
-    #     load_in_4bit=True,
-    #     bnb_4bit_compute_dtype=torch.float32,
-    #     bnb_4bit_quant_type="nf4",
-    #     bnb_4bit_use_double_quant=False,
-    # )
+    quantization_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.float32,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=False,
+    )
     teacher = AutoModelForCausalLM.from_pretrained(
         teacher_model_id,
-        # quantization_config=quantization_config
+        quantization_config=quantization_config,
     )
     teacher.eval()
     return teacher
 
 
+#TODO: json dump config in checkpoints so we can reload later
 def train(model_config, train_config):
     c = train_config
 
     # TODO: replace with data config & load
-    starcoder = load_starcoder_test(tok)
+    data = load_starcoder_test(tok)
     dl = DataLoader(
-        starcoder,
+        data,
         batch_size=4,
         collate_fn=sft_collate_fn,
     )
-
     training_steps = int(len(dl) * c.n_epochs)
     warmup_steps = int(c.warmup_ratio * training_steps)
 
@@ -113,8 +113,8 @@ def train(model_config, train_config):
 
         # optimizers
         optimizer = model.configure_optimizers(train_config)
-        # scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
         scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x: 1.0)
+        # scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
 
         model = DDP(model, device_ids=[rank])
 
@@ -138,6 +138,9 @@ def train(model_config, train_config):
         if master_rank:
             wandb.init(project=c.wandb_project, entity=c.wandb_entity)
 
+    # get total params
+    model.print_total_trainable_parameters()
+
     start = time.time()
     steps = 0
     for epoch in range(c.n_epochs):
@@ -146,6 +149,8 @@ def train(model_config, train_config):
             attn_mask = mini_batch["attn_mask"].to(device)
             prompt_len = mini_batch["prompt_len"].to(device)
             seq_len = mini_batch["seq_len"].to(device)
+
+            # print(tok.batch_decode(input_ids))
 
             out = model(input_ids, attn_mask)
             logits = out["logits"]
@@ -159,6 +164,7 @@ def train(model_config, train_config):
             # https://pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html
             if c.teacher_model_id is not None:
                 t = c.distill_temperature
+
                 with torch.no_grad():
                     teacher_out = teacher(input_ids, output_hidden_states=True)
 
@@ -178,22 +184,11 @@ def train(model_config, train_config):
             # cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
 
             if c.teacher_model_id is not None:
-                loss = (ce_loss + kl) / 2
+              loss = ce_loss + kl
             else:
-                loss = ce_loss
+              loss = ce_loss
 
             loss = loss / c.gradient_accumulation_steps
-
-            # if torch.isnan(loss):
-            #    try:
-            #        print(f'nan encountered for batch {tok.batch_decode(mini_batch)} at step: {steps}')
-            #        del loss
-            #        torch.cuda.empty_cache()
-            #    finally:
-            #        # load state dict from last checkpoint
-            #        model.load_state_dict(torch.load(save_path))
-            #        continue
-
             loss.backward()
             loss.detach().cpu()
 
@@ -213,7 +208,10 @@ def train(model_config, train_config):
             if steps % c.save_steps == 0 or steps == training_steps:
                 if master_rank and c.save_path is not None:
                     print(f"saving model at step: {steps} to file {c.save_path}...")
-                    torch.save(model.module.state_dict(), c.save_path)
+                    if c.ddp:
+                      torch.save(model.module.state_dict(), c.save_path)
+                    else:
+                      torch.save(model.state_dict(), c.save_path)
 
                 if c.ddp:
                     # blocking
@@ -224,6 +222,7 @@ def train(model_config, train_config):
                 dt = (time.time() - start) / (steps + 1e-05)
                 left = dt * (training_steps - steps) / 60
 
+                # TODO: turn this hardcode into a for k,v in losses.items()
                 if master_rank:
                     print(
                         f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
@@ -234,6 +233,7 @@ def train(model_config, train_config):
 
             if c.wandb_report:
                 if master_rank:
+                    # TODO: turn this hardcode into a for k,v in losses.items()
                     wandb.log(
                         {
                             "loss": c.gradient_accumulation_steps * loss.item(),

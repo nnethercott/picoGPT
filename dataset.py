@@ -9,8 +9,10 @@ from datasets import interleave_datasets, load_dataset
 from torch.utils.data import DataLoader, Dataset
 
 # pad token def from llama tokenizer
-PAD_TOKEN = "</s>"
-PAD_TOKEN_ID = 2
+from transformers import AutoTokenizer
+tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+PAD_TOKEN = tok.pad_token
+PAD_TOKEN_ID = tok.pad_token_id
 
 
 def remove_lines_with_substrings(text, substrings):
@@ -49,7 +51,7 @@ def sft_collate_fn(inputs):
     seq_end = (
         torch.tensor([len(i) for i in input_ids]).unsqueeze(1).repeat((1, max_len))
     )
-    attn_mask = (pos < seq_end).to(dtype=torch.int8)
+    attn_mask = (pos < seq_end).to(dtype=torch.float32)
 
     return {
         "prompt_len": torch.tensor(prompt_len),
@@ -259,8 +261,8 @@ def load_alpaca_instruct(tok, rank=0, world_size=1):
 
 def load_slimpajama(tok, rank=0):
     data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-    BLOCK_SIZE = 200000
-    texts = data.skip(8000000 + rank * BLOCK_SIZE).take(BLOCK_SIZE)
+    BLOCK_SIZE = 500
+    texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
 
     # preprocessing
     # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
@@ -276,7 +278,7 @@ def load_slimpajama(tok, rank=0):
         batched=True,
     )
     texts = texts.filter(
-        lambda x: [len(y) >= 16 and len(y) <= 384 for y in x["tokens"]], batched=True
+        lambda x: [len(y) >= 16 and len(y) <= 512 for y in x["tokens"]], batched=True
     )
     tokens = texts["tokens"]
     data = [{"prompt_len": 0, "input_ids": t} for t in tokens]
@@ -355,7 +357,7 @@ def load_starcoder_test(tok):
         streaming=True,
         token=os.environ["HF_ACCESS_TOKEN"],
     )
-    data = data.take(500)
+    data = data.take(5000)
 
     def dataset_generator(dataset):
         yield from dataset
@@ -374,7 +376,7 @@ def load_starcoder_test(tok):
         },
         batched=True,
     )
-    data = data.filter(lambda x: [len(y) <= 25 for y in x["input_ids"]], batched=True)
+    data = data.filter(lambda x: [len(y) <= 512 for y in x["input_ids"]], batched=True)
 
     data = [{"prompt_len": 0, "input_ids": i} for i in data["input_ids"]]
     ds = CustomDataset(data)

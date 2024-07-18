@@ -121,11 +121,15 @@ class CausalSelfAttention(nn.Module):
         attn_mask = attn_mask @ attn_mask.transpose(-1, -2)
         attn_mask = attn_mask.to(dtype=torch.bool) & self.bias[:, :, :T, :T]
 
-        # print((attn_mask[:, -1, :, :]).to(torch.float32))
+        #print((attn_mask[:, -1, :, :]).to(torch.float32))
 
         # fill with -inf
         attn_mask = attn_mask.to(dtype=torch.float32)
-        attn_mask.masked_fill_(attn_mask == 0, torch.finfo(torch.float32).min)  # nice
+        attn_mask.masked_fill_(
+            attn_mask == 0., 
+            #torch.finfo(torch.float32).min, 
+            1e-20, #ad hoc 
+        )  
 
         if self.flash:
             y = F.scaled_dot_product_attention(
@@ -187,6 +191,10 @@ class PicoGPT(nn.Module):
         self.transformer.wte.register_forward_hook(
             functools.partial(neftune_forward_hook, alpha=config.neftune_noise_alpha)
         )
+
+    def print_total_trainable_parameters(self):
+        params = sum(p.numel() for p in self.parameters())
+        print(f'Total trainable parameters: {int(params/1e6)}M')
 
     # from karpathy (tiny llama has different init)
     def _init_weights(self, module):
