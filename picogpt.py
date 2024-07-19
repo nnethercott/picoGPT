@@ -21,6 +21,7 @@ from losses import *
 from model import PicoGPT
 from utils import get_cosine_schedule_with_warmup
 
+TEACHER_MODEL_ID = "microsoft/Phi-3-mini-4k-instruct"
 
 def setup():
     dist.init_process_group("nccl")
@@ -30,41 +31,42 @@ def cleanup():
 
 
 # TODO: change tokenizer and teacher to phi-3
-tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+tok = AutoTokenizer.from_pretrained(TEACHER_MODEL_ID)
 
-
+# https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/discussions/47
 config = Config(
-    vocab_size=len(tok),
+    vocab_size=32064,
     block_size=512,
     n_layer=32,
     n_embd=784,
-    n_head=18,
-    n_query_groups=6,
+    n_head=32,
+    n_query_groups=4,
     tie_weights=True,
     rope_theta=10000,
-    neftune_noise_alpha=1.0,
+    neftune_noise_alpha=0.5,
     dropout=0.1,
 )
 
 train_config = TrainConfig(
     n_epochs=1,
-    batch_size=4,
-    lr=3e-05,
-    min_lr=1e-05,
-    gradient_accumulation_steps=8,
+    batch_size=2,
+    lr=4e-04,
+    betas = (0.9, 0.95),
+    min_lr=4e-05,
+    gradient_accumulation_steps=4,
     warmup_ratio=0.03,
     grad_clip=1.0,
     weight_decay=0.1,
     save_steps=3000,
-    log_steps=1,
-    wandb_report=False,
+    log_steps=50,
+    wandb_report=True,
     wandb_entity="nnethercott",
     wandb_project="picoGPT",
     distill_temperature=1.3,
-    top_k=64,
+    top_k=128,
     ckpt_path=None,
     save_path="./checkpoints/slim_test.pt",
-    teacher_model_id="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
+    # teacher_model_id=TEACHER_MODEL_ID,
     ddp=False,
 )
 
@@ -89,10 +91,10 @@ def train(model_config, train_config):
     c = train_config
 
     # TODO: replace with data config & load
-    data = load_starcoder_test(tok)
+    data = load_slimpajama(tok)
     dl = DataLoader(
         data,
-        batch_size=4,
+        batch_size=c.batch_size,
         collate_fn=sft_collate_fn,
     )
     training_steps = int(len(dl) * c.n_epochs)
@@ -159,19 +161,18 @@ def train(model_config, train_config):
 
             ############# ce #####################
             ce_loss = batched_cross_entropy(input_ids, logits, prompt_len, seq_len)
-
+            return 
             ############## kl ####################
             # https://pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html
-            if c.teacher_model_id is not None:
-                t = c.distill_temperature
+            # t = c.distill_temperature
 
-                with torch.no_grad():
-                    teacher_out = teacher(input_ids, output_hidden_states=True)
+            # with torch.no_grad():
+            #     teacher_out = teacher(input_ids, output_hidden_states=True)
 
-                kl_targets = teacher_out["logits"]
-                kl_targets = kl_targets.detach()
+            # kl_targets = teacher_out["logits"]
+            # kl_targets = kl_targets.detach()
 
-                kl = topk_kl_div(logits, kl_targets, t, k=c.top_k)
+            # kl = topk_kl_div(logits, kl_targets, t, k=c.top_k)
 
             # optional
             ############# cosine loss ###############
@@ -183,10 +184,8 @@ def train(model_config, train_config):
 
             # cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
 
-            if c.teacher_model_id is not None:
-              loss = ce_loss + kl
-            else:
-              loss = ce_loss
+            #loss = (ce_loss + kl)/2
+            loss = ce_loss
 
             loss = loss / c.gradient_accumulation_steps
             loss.backward()
@@ -251,32 +250,30 @@ def train(model_config, train_config):
 
 if __name__ == "__main__":
     # setup()
-    train(config, train_config)
+    # train(config, train_config)
     # cleanup()
 
-    # device = "cuda"
-    # config.block_size = 512
-    # device = "cuda"
-    # model = PicoGPT(config).to(device)
-    # model.eval() #turn off neftune
+     device = "cuda"
+     model = PicoGPT(config).to(device)
+     model.eval() #turn off neftune
 
-    # model.load_state_dict(torch.load("./checkpoints/pico_instruct.pt"))
+     model.load_state_dict(torch.load("./checkpoints/slim_test.pt"))
 
-    # template = "{prompt}\n\n"
-    # prompt = "Write a function which generates a bar plot with title 'nate is cool`."
-    # prompt = template.format(prompt = prompt)
-    #
-    # input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
-    # now = time.time()
-    # generated = model.generate(
-    #    input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
-    #    #input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
-    # )
-    # print(f'elapsed: {time.time()-now}')
+     # template = "{prompt}\n\n
+     prompt = "A man walked into the bar, "
+     # prompt = template.format(prompt = prompt)
+    
+     input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
+     now = time.time()
 
-    # print(prompt)
+     generated = model.generate(
+        input_ids, do_sample=True, max_new_tokens=128, temperature=1.2, top_k=32
+        #input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
+     )
+     print(f'elapsed: {time.time()-now}')
+     print(prompt)
 
-    # print(tok.decode(generated))
+     print(tok.decode(generated))
 #  for g in generated:
 #    print(tok.decode(g, skip_special_tokens=True).strip())
 #    print("------------------------")

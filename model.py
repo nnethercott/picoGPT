@@ -243,7 +243,7 @@ class PicoGPT(nn.Module):
             {"params": nodecay_params, "weight_decay": 0.0},
         ]
 
-        optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr)
+        optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas)
         return optimizer
 
     def generate(
@@ -266,7 +266,7 @@ class PicoGPT(nn.Module):
                 # truncate input_ids to context_length
                 input_ids = input_ids[:, -self.config.block_size :]
 
-                logits = self.forward(input_ids)["logits"][:, -1]
+                logits = self.forward(input_ids, torch.ones_like(input_ids, device=input_ids.device, dtype=torch.float32))["logits"][:, -1]
 
                 if do_sample:
                     if top_k is not None:
@@ -316,7 +316,8 @@ class PicoGPT(nn.Module):
 
             for beam in beams:
                 # truncate
-                logits = self.forward(beam["ids"][:, -self.config.block_size :])[
+                ids = beam["ids"][:, -self.config.block_size :]
+                logits = self.forward(ids, attn_mask = torch.ones_like(ids, device=ids.device, dtype=torch.float32))[
                     "logits"
                 ]
 

@@ -5,8 +5,9 @@ TORCH_F32_MIN = torch.finfo(torch.float32).min
 
 
 # TODO: potentially remove prompt tokens from kl loss
+# TODO: pad tokens are still included here 
 def topk_kl_div(inputs, targets, t=1.0, k=None):
-    assert inputs.shape == targets.shape
+    assert inputs.shape == targets.shape, f'inputs: {inputs.shape} != targets: {targets.shape}'
 
     if k is not None:
         B, T, d = targets.size()
@@ -53,6 +54,8 @@ def batched_cross_entropy(input_ids, logits, prompt_len, seq_len):
     # mask for padded
     targets.masked_fill_(before_mask, -100)
     targets.masked_fill_(after_mask, -100)
+
+    print(targets)
 
     # debug
     # _targets = targets.clone()

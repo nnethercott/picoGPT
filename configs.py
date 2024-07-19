@@ -1,5 +1,5 @@
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Optional, List
 
 import torch
 
@@ -39,6 +39,7 @@ class TrainConfig:
     grad_clip: Optional[float] = None
     weight_decay: float = 0.0
     lr: float = 1e-03
+    betas: List = field(default_factory = lambda: [0.9, 0.999]),
     min_lr: float = 1e-05
     distill_temperature: float = 1.0
     top_k: Optional[int] = None,
