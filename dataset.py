@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Dataset
 
 # pad token def from llama tokenizer
 from transformers import AutoTokenizer
+#tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
 tok = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
 PAD_TOKEN = tok.pad_token
 PAD_TOKEN_ID = tok.pad_token_id
@@ -261,8 +262,8 @@ def load_alpaca_instruct(tok, rank=0, world_size=1):
 
 def load_slimpajama(tok, rank=0):
     data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-    BLOCK_SIZE = 3000
-    texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
+    BLOCK_SIZE = 200000
+    texts = data.skip(300000 + rank * BLOCK_SIZE).take(BLOCK_SIZE)
 
     # preprocessing
     # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset

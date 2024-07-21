@@ -3,9 +3,10 @@ import math
 
 import torch
 import torch.nn.functional as F
+from torch import nn
 import wandb
 from rotary_embedding_torch import RotaryEmbedding
-from torch import nn
+import bitsandbytes as bnb 
 
 from configs import Config
 from utils import RMSNorm, neftune_forward_hook
@@ -123,31 +124,41 @@ class CausalSelfAttention(nn.Module):
 
         #print((attn_mask[:, -1, :, :]).to(torch.float32))
 
-        # fill with -inf
-        attn_mask = attn_mask.to(dtype=torch.float32)
-        attn_mask.masked_fill_(
-            attn_mask == 0., 
-            #torch.finfo(torch.float32).min, 
-            1e-20, #ad hoc 
-        )  
+        # fill 0's with -inf
+        #attn_mask = attn_mask.to(dtype=torch.float32)
+        #attn_mask.masked_fill_(
+        #    attn_mask == 0., 
+        #    #torch.finfo(torch.float32).min, 
+        #    -1e20, #ad hoc 
+        #)  
+        # fill 1's with 0's 
+        #attn_mask.masked_fill_(
+        #    attn_mask == 1., 
+        #    0.0,
+        #)  
 
-        if self.flash:
+        #print((attn_mask[:, -1, :, :]))
+        #print(attn_mask.shape)
+
+        #if self.flash:
+        if False:
             y = F.scaled_dot_product_attention(
                 q,
                 k,
                 v,
                 attn_mask=attn_mask,
                 dropout_p=self.config.dropout if self.training else 0.0,
-                is_causal=False,
+                is_causal= attn_mask is None,
             )
         else:
-            raise NotImplementedError
-        #     att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        #     att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        #     att = F.softmax(att, dim=-1)
-        #     att = self.attn_dropout(att) if self.training else nn.Identity(att)
-        #     y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        #
+            #raise NotImplementedError
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(attn_mask == 0, -1e20)
+            att = F.softmax(att, dim=-1)
+            #print(att[:,-1,:,:])
+            att = self.attn_dropout(att) if self.training else nn.Identity()(att)
+            y = att @ v # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        
         return y.transpose(1, 2).contiguous()
 
 
@@ -244,12 +255,15 @@ class PicoGPT(nn.Module):
         ]
 
         optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas)
+        #optimizer = bnb.optim.Adam8bit(optim_groups, lr=train_config.lr, betas=train_config.betas)
+
         return optimizer
 
     def generate(
         self,
         input_ids,
         max_new_tokens=64,
+        min_new_tokens=0,
         temperature=1.0,
         top_k=None,
         do_sample=False,

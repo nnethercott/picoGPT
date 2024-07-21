@@ -6,8 +6,8 @@ TORCH_F32_MIN = torch.finfo(torch.float32).min
 
 # TODO: potentially remove prompt tokens from kl loss
 # TODO: pad tokens are still included here 
-def topk_kl_div(inputs, targets, t=1.0, k=None):
-    assert inputs.shape == targets.shape, f'inputs: {inputs.shape} != targets: {targets.shape}'
+def topk_kl_div(input_ids, logits, targets, t=1.0, k=None, ignore_index=-100):
+    assert logits.shape == targets.shape, f'logits: {logits.shape} != targets: {targets.shape}'
 
     if k is not None:
         B, T, d = targets.size()
@@ -15,21 +15,26 @@ def topk_kl_div(inputs, targets, t=1.0, k=None):
         mask = (
             torch.ones_like(targets, requires_grad=False)
             .scatter_(-1, indices, 0)
-            .to(inputs.device, dtype=torch.bool)
+            .to(logits.device, dtype=torch.bool)
         )
-        inputs[mask] = TORCH_F32_MIN
+        logits[mask] = TORCH_F32_MIN
         targets[mask] = TORCH_F32_MIN
 
         del mask
         torch.cuda.empty_cache()
 
+    input_ids = input_ids.view(-1)
     targets = targets.view(-1, targets.size(-1))
-    inputs = inputs.view(-1, inputs.size(-1))
+    logits = logits.view(-1, logits.size(-1))
+
+    # hacky: not considering the kl loss over the eos token since it matches the padded one 
+    targets = targets[input_ids != ignore_index, :]
+    logits = logits[input_ids != ignore_index, :]
 
     targets = F.log_softmax(targets / t, dim=-1)
-    inputs = F.log_softmax(inputs / t, dim=-1)
+    logits = F.log_softmax(logits / t, dim=-1)
 
-    kl = F.kl_div(inputs, targets, log_target=True, reduction="batchmean")
+    kl = F.kl_div(logits, targets, log_target=True, reduction="batchmean")
 
     return kl
 
@@ -55,7 +60,7 @@ def batched_cross_entropy(input_ids, logits, prompt_len, seq_len):
     targets.masked_fill_(before_mask, -100)
     targets.masked_fill_(after_mask, -100)
 
-    print(targets)
+    # print(targets)
 
     # debug
     # _targets = targets.clone()
@@ -69,7 +74,7 @@ def batched_cross_entropy(input_ids, logits, prompt_len, seq_len):
 
     # print(tok.decode(targets[prompt_len:]))
 
-    return F.cross_entropy(logits, targets, reduction="mean")
+    return F.cross_entropy(logits, targets, reduction="mean", ignore_index = -100)
 
 
 def cosine_loss(inputs, targets, device, n):
