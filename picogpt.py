@@ -21,8 +21,8 @@ from losses import *
 from model import PicoGPT
 from utils import get_cosine_schedule_with_warmup
 
-#TEACHER_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-TEACHER_MODEL_ID = "microsoft/Phi-3-mini-4k-instruct"
+TEACHER_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+#TEACHER_MODEL_ID = "microsoft/Phi-3-mini-4k-instruct"
 
 def setup():
     dist.init_process_group("nccl")
@@ -36,26 +36,26 @@ tok = AutoTokenizer.from_pretrained(TEACHER_MODEL_ID)
 
 # https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/discussions/47
 config = Config(
-    vocab_size=32064,
+    vocab_size=len(tok),
     block_size=512,
-    n_layer=32,
+    n_layer=30,
     n_embd=784,
     n_head=32,
     n_query_groups=4,
     tie_weights=True,
     rope_theta=10000,
-    neftune_noise_alpha=0.0,
+    neftune_noise_alpha=0.1,
     dropout=0.1,
 )
 
 train_config = TrainConfig(
     n_epochs=1,
-    batch_size=1,
-    lr=1e-04,
+    batch_size=2,
+    lr=8.9e-05,
     betas = (0.9, 0.95), # tinyllama or something
     min_lr=4e-05,
-    gradient_accumulation_steps=4,
-    warmup_ratio=0.03,
+    gradient_accumulation_steps=6,
+    warmup_ratio=0.0,
     grad_clip=1.0,
     weight_decay=0.1,
     save_steps=1000,
@@ -63,11 +63,13 @@ train_config = TrainConfig(
     wandb_report=True,
     wandb_entity="nnethercott",
     wandb_project="picoGPT",
-    distill_temperature=1.3,
+    distill_temperature=1.2,
     top_k=128,
-    ckpt_path='./checkpoints/slim_test.pt',
-    save_path="./checkpoints/slim_test.pt",
+    #ckpt_path=None,
+    ckpt_path ="/mnt/nate/checkpoints/slim_test.pt",
+    save_path="/mnt/nate/checkpoints/slim_test.pt",
     teacher_model_id=TEACHER_MODEL_ID,
+    #teacher_model_id = None,
     ddp=True,
 )
 
@@ -92,7 +94,7 @@ def train(model_config, train_config):
     c = train_config
 
     # TODO: replace with data config & load
-    data = load_slimpajama(tok)
+    data = load_smollm_fineweb(tok)
     #data = load_starcoder_test(tok)
     dl = DataLoader(
         data,
@@ -118,8 +120,8 @@ def train(model_config, train_config):
 
         # optimizers
         optimizer = model.configure_optimizers(train_config)
-        scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x: 1.0)
-        #scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
+        #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x: 1.0)
+        scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
 
         model = DDP(model, device_ids=[rank])
 
@@ -131,9 +133,7 @@ def train(model_config, train_config):
             model.load_state_dict(torch.load(c.ckpt_path))
 
         optimizer = model.configure_optimizers(train_config)
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer, warmup_steps, training_steps
-        )
+        scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
         master_rank = True
 
     if c.teacher_model_id is not None:
@@ -153,6 +153,8 @@ def train(model_config, train_config):
     steps = 0
     for epoch in range(c.n_epochs):
         for e, mini_batch in enumerate(dl):
+            if e<=(317472):
+                continue
             input_ids = mini_batch["input_ids"].to(device)
             attn_mask = mini_batch["attn_mask"].to(device)
             prompt_len = mini_batch["prompt_len"].to(device)
@@ -191,7 +193,8 @@ def train(model_config, train_config):
 
             # cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
 
-            loss = (ce_loss + kl)/2
+            alpha = ce_loss.item()/kl.item()
+            loss = (ce_loss + kl*alpha)/2
             # loss = ce_loss
 
             loss = loss / c.gradient_accumulation_steps
@@ -226,12 +229,12 @@ def train(model_config, train_config):
             if steps % c.log_steps == 0:
                 lossf = c.gradient_accumulation_steps * loss.item()
                 dt = (time.time() - start) / (steps + 1e-05)
-                left = dt * (training_steps - steps) / 60
+                left = dt * (training_steps - e) / 60
 
                 # TODO: turn this hardcode into a for k,v in losses.items()
                 if master_rank:
                     print(
-                        f"iter {steps}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
+                        f"iter {e}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
                     )
                     # print(
                     #    f"iter {steps}/{training_steps} | ce {ce_loss.item():.4f} | kl: {kl.item():.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
@@ -245,7 +248,7 @@ def train(model_config, train_config):
                             "loss": c.gradient_accumulation_steps * loss.item(),
                             "ce": ce_loss,
                             "ppl": 2**ce_loss,
-                            "kl": kl,
+                             "kl": kl,
                             # "cosine": cl,  # /math.sqrt(config.n_embd),
                             "lr": scheduler.get_last_lr()[0],
                         }
@@ -256,31 +259,31 @@ def train(model_config, train_config):
 
 
 if __name__ == "__main__":
-    setup()
-    train(config, train_config)
-    cleanup()
+    #setup()
+    #train(config, train_config)
+    #cleanup()
 
-    #device = "cuda"
-    #model = PicoGPT(config).to(device)
-    #model.eval() #turn off neftune
+    device = "cuda"
+    model = PicoGPT(config).to(device)
+    model.eval() #turn off neftune
 
-    #model.load_state_dict(torch.load("./checkpoints/slim_test.pt"))
+    model.load_state_dict(torch.load("/mnt/nate/checkpoints/slim_test.pt"))
 
-    ## template = "{prompt}\n\n
-    #prompt = "A man walked into the bar, "
-    ## prompt = template.format(prompt = prompt)
-    #
-    #input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
-    #now = time.time()
+    # template = "{prompt}\n\n
+    prompt = "Potassium"
+    # prompt = template.format(prompt = prompt)
+    
+    input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
+    now = time.time()
 
-    #generated = model.generate(
-    #   input_ids, do_sample=True, max_new_tokens=128, min_new_tokens = 10, temperature=1.2, top_k=32, eos_token_id = tok.eos_token_id,
-    #   #input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
-    #)
-    #print(f'elapsed: {time.time()-now}')
-    #print(prompt)
+    generated = model.generate(
+       #input_ids, do_sample=True, max_new_tokens=128, min_new_tokens = 10, temperature=1.2, top_k=32, eos_token_id = tok.eos_token_id,
+       input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
+    )
+    print(f'elapsed: {time.time()-now}')
+    print(prompt)
 
     #print(tok.decode(generated))
-    #for g in generated:
-    #   print(tok.decode(g, skip_special_tokens=True).strip())
-    #   print("------------------------")
+    for g in generated:
+       print(tok.decode(g, skip_special_tokens=True).strip())
+       print("------------------------")

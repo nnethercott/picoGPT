@@ -172,7 +172,7 @@ class Block(nn.Module):
 
     def forward(self, x, attn_mask=None):
         x = x + self.attn(self.norm_1(x), attn_mask)
-        x = x + self.mlp(self.norm_2(x))
+        x = x + self.norm_2(self.mlp(x)) # mobilellm 
         return x
 
 
@@ -254,8 +254,8 @@ class PicoGPT(nn.Module):
             {"params": nodecay_params, "weight_decay": 0.0},
         ]
 
-        optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas)
-        #optimizer = bnb.optim.Adam8bit(optim_groups, lr=train_config.lr, betas=train_config.betas)
+        #optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas)
+        optimizer = bnb.optim.Adam8bit(optim_groups, lr=train_config.lr, betas=train_config.betas)
 
         return optimizer
 

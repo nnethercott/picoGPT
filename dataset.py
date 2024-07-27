@@ -10,8 +10,8 @@ from torch.utils.data import DataLoader, Dataset
 
 # pad token def from llama tokenizer
 from transformers import AutoTokenizer
-#tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
-tok = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
+tok = AutoTokenizer.from_pretrained("TinyLlama/TinyLlama-1.1B-Chat-v1.0")
+#tok = AutoTokenizer.from_pretrained("microsoft/Phi-3-mini-4k-instruct")
 PAD_TOKEN = tok.pad_token
 PAD_TOKEN_ID = tok.pad_token_id
 
@@ -75,6 +75,11 @@ class CustomDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
+#TODO:
+"""
+def load_dataset(hf_name, *args, **kwargs):
+    # make sure data has cols `text` and `prompt` 
+"""
 
 def load_starcoder(lang, tok, rank=0):
     data = load_dataset(
@@ -258,12 +263,69 @@ def load_alpaca_instruct(tok, rank=0, world_size=1):
 # dl = DataLoader(
 #    ds, batch_size=train_config.batch_size, shuffle=False, collate_fn=collate_fn
 # )
+def load_smollm_cosmo(tok, rank=0):
+    data = load_dataset("HuggingFaceTB/smollm-corpus", "cosmopedia-v2", split="train", streaming=True)
+    BLOCK_SIZE = 4000
+    texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
 
+    # preprocessing
+    # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
+    def dataset_generator(dataset):
+        yield from dataset
+
+    texts = datasets.Dataset.from_generator(functools.partial(dataset_generator, texts))
+    texts = texts.map(
+        lambda x: {
+            **x,
+            "tokens": [tok.encode(y) + [tok.eos_token_id] for y in x["text"]],
+        },
+        batched=True,
+    )
+    texts = texts.filter(
+        lambda x: [len(y) >= 16 and len(y) <= 384 for y in x["tokens"]], batched=True
+    )
+    tokens = texts["tokens"]
+    data = [{"prompt_len": 0, "input_ids": t} for t in tokens]
+
+    # dataset object
+    ds = CustomDataset(data)
+
+    return ds
+
+
+def load_smollm_fineweb(tok, rank=0):
+    data = load_dataset("HuggingFaceTB/smollm-corpus", "fineweb-edu-dedup", split="train", streaming=True)
+    BLOCK_SIZE = 3000000
+    texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
+
+    # preprocessing
+    # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
+    def dataset_generator(dataset):
+        yield from dataset
+
+    texts = datasets.Dataset.from_generator(functools.partial(dataset_generator, texts))
+    texts = texts.map(
+        lambda x: {
+            **x,
+            "tokens": [tok.encode(y) + [tok.eos_token_id] for y in x["text"]],
+        },
+        batched=True,
+    )
+    texts = texts.filter(
+        lambda x: [len(y) >= 16 and len(y) <= 384 for y in x["tokens"]], batched=True
+    )
+    tokens = texts["tokens"]
+    data = [{"prompt_len": 0, "input_ids": t} for t in tokens]
+
+    # dataset object
+    ds = CustomDataset(data)
+
+    return ds
 
 def load_slimpajama(tok, rank=0):
     data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-    BLOCK_SIZE = 200000
-    texts = data.skip(300000 + rank * BLOCK_SIZE).take(BLOCK_SIZE)
+    BLOCK_SIZE = 100
+    texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
 
     # preprocessing
     # https://stackoverflow.com/questions/76227219/can-i-convert-an-iterabledataset-to-dataset
@@ -387,7 +449,8 @@ def load_starcoder_test(tok):
 
 if __name__ == "__main__":
 
-    data = load_slimpajama(tok)
+    data = load_smollm_fineweb(tok)
+    #data = load_slimpajama(tok)
 
     dl = DataLoader(
         data,
