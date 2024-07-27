@@ -153,7 +153,11 @@ class CausalSelfAttention(nn.Module):
         else:
             #raise NotImplementedError
             att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            att = att.masked_fill(attn_mask == 0, -1e20)
+            att = att.masked_fill(
+                attn_mask == 0, 
+                #-1e20
+                torch.finfo(torch.float16).min,
+                )
             att = F.softmax(att, dim=-1)
             #print(att[:,-1,:,:])
             att = self.attn_dropout(att) if self.training else nn.Identity()(att)
@@ -254,8 +258,8 @@ class PicoGPT(nn.Module):
             {"params": nodecay_params, "weight_decay": 0.0},
         ]
 
-        #optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas)
-        optimizer = bnb.optim.Adam8bit(optim_groups, lr=train_config.lr, betas=train_config.betas)
+        optimizer = torch.optim.AdamW(optim_groups, lr=train_config.lr, betas=train_config.betas)
+        #optimizer = bnb.optim.Adam8bit(optim_groups, lr=train_config.lr, betas=train_config.betas)
 
         return optimizer
 

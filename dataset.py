@@ -207,7 +207,7 @@ def load_ultrachat(tok, rank=0, world_size=1):
 
 
 def load_alpaca_instruct(tok, rank=0, world_size=1):
-    data = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train")
+    data = load_dataset("iamtarun/python_code_instructions_18k_alpaca", split="train[:5000]")
 
     # some entries contain 'input': Not available -> just filter to empty
     def apply_convo(examples):
@@ -295,7 +295,7 @@ def load_smollm_cosmo(tok, rank=0):
 
 def load_smollm_fineweb(tok, rank=0):
     data = load_dataset("HuggingFaceTB/smollm-corpus", "fineweb-edu-dedup", split="train", streaming=True)
-    BLOCK_SIZE = 3000000
+    BLOCK_SIZE = 5000
     texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
 
     # preprocessing
@@ -324,7 +324,7 @@ def load_smollm_fineweb(tok, rank=0):
 
 def load_slimpajama(tok, rank=0):
     data = load_dataset("cerebras/SlimPajama-627B", split="train", streaming=True)
-    BLOCK_SIZE = 100
+    BLOCK_SIZE = 5000
     texts = data.skip(rank * BLOCK_SIZE).take(BLOCK_SIZE)
 
     # preprocessing
