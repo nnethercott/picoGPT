@@ -21,25 +21,22 @@ from losses import *
 from model import PicoGPT
 from utils import get_cosine_schedule_with_warmup
 
-TEACHER_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
-#TEACHER_MODEL_ID = "microsoft/Phi-3-mini-4k-instruct"
+import deepspeed
 
 def setup():
-    dist.init_process_group("nccl")
+    #dist.init_process_group("nccl")
+    deepspeed.init_distributed()
 
 def cleanup():
     dist.destroy_process_group()
 
 
-# TODO: change tokenizer and teacher to phi-3
-tok = AutoTokenizer.from_pretrained(TEACHER_MODEL_ID)
-
 # https://huggingface.co/microsoft/Phi-3-mini-4k-instruct/discussions/47
 config = Config(
     vocab_size=len(tok),
     block_size=512,
-    n_layer=30,
-    n_embd=784,
+    n_layer=32,
+    n_embd=512,
     n_head=32,
     n_query_groups=4,
     tie_weights=True,
@@ -52,50 +49,22 @@ train_config = TrainConfig(
     n_epochs=1,
     batch_size=2,
     lr=8.9e-05,
-    betas = (0.9, 0.95), # tinyllama or something
     min_lr=4e-05,
-    gradient_accumulation_steps=6,
     warmup_ratio=0.0,
     grad_clip=1.0,
     weight_decay=0.1,
-    save_steps=1000,
-    log_steps=50,
-    wandb_report=True,
-    wandb_entity="nnethercott",
-    wandb_project="picoGPT",
-    distill_temperature=1.2,
-    top_k=128,
-    #ckpt_path=None,
-    ckpt_path ="/mnt/nate/checkpoints/slim_test.pt",
-    save_path="/mnt/nate/checkpoints/slim_test.pt",
-    teacher_model_id=TEACHER_MODEL_ID,
-    #teacher_model_id = None,
+    log_steps=5,
+    wandb_report=False,
+    ckpt_path=None,
+    save_path=None,
     ddp=True,
 )
 
 
-def load_teacher(teacher_model_id):
-    quantization_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.float32,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_use_double_quant=False,
-    )
-    teacher = AutoModelForCausalLM.from_pretrained(
-        teacher_model_id,
-        quantization_config=quantization_config,
-    )
-    teacher.eval()
-    return teacher
-
-
-#TODO: json dump config in checkpoints so we can reload later
 def train(model_config, train_config):
     c = train_config
 
-    # TODO: replace with data config & load
-    data = load_smollm_fineweb(tok)
-    #data = load_starcoder_test(tok)
+    data = load_starcoder_test(tok)
     dl = DataLoader(
         data,
         batch_size=c.batch_size,
@@ -105,62 +74,24 @@ def train(model_config, train_config):
     training_steps = int(len(dl) * c.n_epochs)
     warmup_steps = int(c.warmup_ratio * training_steps)
 
-    if c.ddp:
-        # DDP setup
-        rank = int(os.environ["LOCAL_RANK"])
-        master_rank = rank == 0
-        world_size = int(os.environ["WORLD_SIZE"])
-        device = f"cuda:{rank}"
-        torch.cuda.set_device(rank)
-        model = PicoGPT(model_config).to(device)
+    device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        if c.ckpt_path:
-            print(f"loading checkpoint {c.ckpt_path} from file...")
-            model.load_state_dict(torch.load(c.ckpt_path))
+    # <|DEEPSPEED|>
+    model = PicoGPT(model_config)
+    model.print_total_trainable_parameters()
 
-        # optimizers
-        optimizer = model.configure_optimizers(train_config)
-        #scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lambda x: 1.0)
-        scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
-
-        model = DDP(model, device_ids=[rank])
-
-    else:
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-        model = PicoGPT(model_config).to(device)
-        if c.ckpt_path:
-            print(f"loading checkpoint {c.ckpt_path} from file...")
-            model.load_state_dict(torch.load(c.ckpt_path))
-
-        optimizer = model.configure_optimizers(train_config)
-        scheduler = get_cosine_schedule_with_warmup(optimizer, warmup_steps, training_steps, min_lr = c.min_lr)
-        master_rank = True
-
-    if c.teacher_model_id is not None:
-        teacher = load_teacher(c.teacher_model_id)
-
-    if c.wandb_report:
-        if master_rank:
-            wandb.init(project=c.wandb_project, entity=c.wandb_entity)
-
-    # get total params
-    if c.ddp:
-        model.module.print_total_trainable_parameters()
-    else:
-        model.print_total_trainable_parameters()
+    model, optimizer, _, _ = deepspeed.initialize(model=model, model_parameters=model.parameters(), config="ds_config.json")
+    
 
     start = time.time()
     steps = 0
     for epoch in range(c.n_epochs):
         for e, mini_batch in enumerate(dl):
-            if e<=(317472):
-                continue
+            # might have to lump this in with model forward
             input_ids = mini_batch["input_ids"].to(device)
             attn_mask = mini_batch["attn_mask"].to(device)
             prompt_len = mini_batch["prompt_len"].to(device)
             seq_len = mini_batch["seq_len"].to(device)
-
-            # print(tok.batch_decode(input_ids))
 
             out = model(input_ids, attn_mask)
             logits = out["logits"]
@@ -168,122 +99,52 @@ def train(model_config, train_config):
             B, T, d = logits.shape
 
             ############# ce #####################
-            ce_loss = batched_cross_entropy(input_ids, logits, prompt_len, seq_len)
-            #return
+            loss = batched_cross_entropy(input_ids, logits, prompt_len, seq_len)
 
-            ############## kl ####################
-            # https://pytorch.org/docs/stable/generated/torch.nn.KLDivLoss.html
-            t = c.distill_temperature
+            model.backward(loss)
+            model.step()
 
-            with torch.no_grad():
-                teacher_out = teacher(input_ids, output_hidden_states=True)
-
-            kl_targets = teacher_out["logits"]
-            kl_targets = kl_targets.detach()
-
-            kl = topk_kl_div(input_ids, logits, kl_targets, t, k=c.top_k, ignore_index=tok.pad_token_id)
-
-            # optional
-            ############# cosine loss ###############
-            # hidden_states = out["hidden_states"]
-            # teacher_hidden_states = teacher_out["hidden_states"]
-
-            # hidden_states = [s.to(device) for s in hidden_states]
-            # teacher_hidden_states = [s.to(device) for s in teacher_hidden_states]
-
-            # cl = cosine_loss(hidden_states, teacher_hidden_states, device, 4)
-
-            alpha = ce_loss.item()/kl.item()
-            loss = (ce_loss + kl*alpha)/2
-            # loss = ce_loss
-
-            loss = loss / c.gradient_accumulation_steps
-            loss.backward()
-            loss.detach().cpu()
-
-            if (
-                steps % c.gradient_accumulation_steps == 0
-                or steps == training_steps - 1
-            ):
-                if c.grad_clip:
-                    nn.utils.clip_grad_norm_(model.parameters(), c.grad_clip)
-
-                optimizer.step()
-                optimizer.zero_grad()
-
-            scheduler.step()
-
-            steps += 1
-            if steps % c.save_steps == 0 or steps == training_steps:
-                if master_rank and c.save_path is not None:
-                    print(f"saving model at step: {steps} to file {c.save_path}...")
-                    if c.ddp:
-                      torch.save(model.module.state_dict(), c.save_path)
-                    else:
-                      torch.save(model.state_dict(), c.save_path)
-
-                if c.ddp:
-                    # blocking
-                    dist.barrier()
-
+            steps+=1
             if steps % c.log_steps == 0:
-                lossf = c.gradient_accumulation_steps * loss.item()
-                dt = (time.time() - start) / (steps + 1e-05)
-                left = dt * (training_steps - e) / 60
+                lossf = loss.item()
+                dt = (time.time() - start) / (steps+1e-05)
+                left = dt * (training_steps - steps) / 60
 
-                # TODO: turn this hardcode into a for k,v in losses.items()
-                if master_rank:
-                    print(
-                        f"iter {e}/{training_steps} | loss {lossf:.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
-                    )
-                    # print(
-                    #    f"iter {steps}/{training_steps} | ce {ce_loss.item():.4f} | kl: {kl.item():.4f} | lr {scheduler.get_last_lr()[0]:6f} | est. time {left:2f}"
-                    # )
-
-            if c.wandb_report:
-                if master_rank:
-                    # TODO: turn this hardcode into a for k,v in losses.items()
-                    wandb.log(
-                        {
-                            "loss": c.gradient_accumulation_steps * loss.item(),
-                            "ce": ce_loss,
-                            "ppl": 2**ce_loss,
-                             "kl": kl,
-                            # "cosine": cl,  # /math.sqrt(config.n_embd),
-                            "lr": scheduler.get_last_lr()[0],
-                        }
-                    )
+                if os.getenv("LOCAL_RANK") == "0":
+                  print(
+                      f"iter {steps}/{training_steps} | loss {lossf:.4f} | est. time {left:2f}"
+                  )
 
     stop = time.time()
     print(f"finished training in {stop-start}s")
 
 
 if __name__ == "__main__":
-    #setup()
-    #train(config, train_config)
-    #cleanup()
+    setup()
+    train(config, train_config)
+    cleanup()
 
-    device = "cuda"
-    model = PicoGPT(config).to(device)
-    model.eval() #turn off neftune
+    #device = "cuda"
+    #model = PicoGPT(config).to(device)
+    #model.eval() #turn off neftune
 
-    model.load_state_dict(torch.load("/mnt/nate/checkpoints/slim_test.pt"))
+    #model.load_state_dict(torch.load("/mnt/nate/checkpoints/slim_test.pt"))
 
-    # template = "{prompt}\n\n
-    prompt = "Potassium"
-    # prompt = template.format(prompt = prompt)
-    
-    input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
-    now = time.time()
+    ## template = "{prompt}\n\n
+    #prompt = "Potassium"
+    ## prompt = template.format(prompt = prompt)
+    #
+    #input_ids = torch.tensor(tok.encode(prompt)).unsqueeze(0).to(device)
+    #now = time.time()
 
-    generated = model.generate(
-       #input_ids, do_sample=True, max_new_tokens=128, min_new_tokens = 10, temperature=1.2, top_k=32, eos_token_id = tok.eos_token_id,
-       input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
-    )
-    print(f'elapsed: {time.time()-now}')
-    print(prompt)
+    #generated = model.generate(
+    #   #input_ids, do_sample=True, max_new_tokens=128, min_new_tokens = 10, temperature=1.2, top_k=32, eos_token_id = tok.eos_token_id,
+    #   input_ids, do_sample = False, max_new_tokens = 64, num_beams=3, num_return_sequences=3, repetition_penalty=1.3, eos_token_id = tok.eos_token_id,
+    #)
+    #print(f'elapsed: {time.time()-now}')
+    #print(prompt)
 
     #print(tok.decode(generated))
-    for g in generated:
-       print(tok.decode(g, skip_special_tokens=True).strip())
-       print("------------------------")
+    #for g in generated:
+    #   print(tok.decode(g, skip_special_tokens=True).strip())
+    #   print("------------------------")
