@@ -1,5 +1,6 @@
 # std
 import time
+import json 
 
 # torch
 import torch
@@ -32,7 +33,7 @@ Adam = torch.optim.AdamW
 config = Config(
     vocab_size=len(tok),
     block_size=512,
-    n_layer=15,
+    n_layer=23,
     n_embd=2048,
     n_head=32,
     n_query_groups=4,
@@ -84,7 +85,7 @@ def train(fabric, state, dl):
 
         if not is_accumulating:
           # grad clip throws errors using deepspeed, should be in ds_config.json
-          fabric.clip_gradients(model, optimizer, max_norm=1.0)
+          #fabric.clip_gradients(model, optimizer, max_norm=1.0)
           optimizer.step()
           optimizer.zero_grad()
 
@@ -113,35 +114,29 @@ def main():
 
 
   # <|FABRIC|>
-  # TODO: move devices and such to a launch arg
+  with open('ds_config.json') as f:
+    ds_config = json.loads(f.read())
+
+  #strategy="auto"
+  strategy = FSDPStrategy(
+                  auto_wrap_policy={Block},
+                  activation_checkpointing_policy=None, #crashes for some reason
+                  sharding_strategy=dist.fsdp.ShardingStrategy.FULL_SHARD,
+                  state_dict_type="full",
+                  limit_all_gathers=True,
+                  cpu_offload=False,
+              )
+  #strategy = DeepSpeedStrategy(config = ds_config)
+
   fabric = L.Fabric(
-      #precision = "16-mixed",
-      devices = 2,
+      precision = "16-mixed",
+      devices = 4,
       accelerator = "cuda",
-
-      # NOTE: we can try different strategies like zero
-      #strategy="auto",
-      strategy = FSDPStrategy(
-                      auto_wrap_policy={Block},
-                      activation_checkpointing_policy=None, #crashes for some reason
-                      sharding_strategy="FULL_SHARD",
-                      state_dict_type="full",
-                      limit_all_gathers=True,
-                      cpu_offload=False,
-                  ),
-
-      # better to load from a json as DeepSpeedStrategy(config = ds_config)
-      #strategy = DeepSpeedStrategy(
-      #                      stage=2,
-      #                      offload_optimizer=True, 
-      #                      allgather_bucket_size=1e8, 
-      #                      reduce_bucket_size=1e8
-      #                  ),
+      strategy = strategy,
   )
-    
   fabric.launch()
-
   fabric.seed_everything(42)
+
   device = fabric.device
 
   # <|MODEL|>
@@ -153,7 +148,7 @@ def main():
   model.print_total_trainable_parameters()
   print("###################")
 
-  optimizer = Adam(
+  optimizer = torch.optim.AdamW(
           model.parameters(), lr=3e-05, weight_decay=0.1, betas=(0.99, 0.95),
       )
   model, optimizer = fabric.setup(model, optimizer)
